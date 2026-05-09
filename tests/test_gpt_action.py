@@ -10,6 +10,7 @@ from app.gpt_action import (
     require_gpt_api_key_value,
 )
 from app.main import app, get_mlb_engine, get_stake_client
+from app.mlb_bridge import clear_mlb_bridge_cache
 
 
 class FakeStakeClient:
@@ -279,10 +280,12 @@ class FakeMLBEngine:
 
 @pytest.fixture(autouse=True)
 def override_clients():
+    clear_mlb_bridge_cache()
     app.dependency_overrides[get_stake_client] = lambda: FakeStakeClient()
     app.dependency_overrides[get_mlb_engine] = lambda: FakeMLBEngine()
     yield
     app.dependency_overrides.clear()
+    clear_mlb_bridge_cache()
 
 
 def test_gpt_schema_exposes_read_only_matchup_action():

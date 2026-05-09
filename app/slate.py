@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import date, datetime
 from html import escape
 from typing import Any
@@ -69,11 +69,14 @@ async def build_mlb_player_props_slate(
     line_mode: str = "primary",
     include_markets: Iterable[str] | None = None,
     exclude_markets: Iterable[str] | None = None,
+    fixture_filter: Callable[[dict[str, Any]], bool] | None = None,
 ) -> dict[str, Any]:
     timezone = ZoneInfo(timezone_name)
     target_date = slate_date or datetime.now(timezone).date()
     schedule = await client.get_tournament_schedule("baseball", "usa", "mlb")
     fixtures = _fixtures_for_date(schedule, target_date, timezone)
+    if fixture_filter is not None:
+        fixtures = [fixture for fixture in fixtures if fixture_filter(fixture)]
     fixtures = fixtures[: _clean_limit(limit)]
     include_filter = _normalize_market_filter(include_markets)
     exclude_filter = _normalize_market_filter(exclude_markets)

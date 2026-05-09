@@ -182,6 +182,7 @@ async def build_matchup_picks(
     clean_side = _clean_side(side)
     clean_markets = _clean_market_csv(markets) or _clean_market_csv(CORE_GPT_MARKETS)
     target_date = slate_date or _today(timezone_name)
+    matchup_tokens = _matchup_tokens(matchup)
     if _clear_mlb_cache_per_gpt_request():
         clear_mlb_bridge_cache()
 
@@ -193,6 +194,7 @@ async def build_matchup_picks(
         line_mode="all",
         include_markets=clean_markets,
         exclude_markets=None,
+        fixture_filter=lambda fixture: _fixture_matches_tokens(fixture, matchup_tokens),
     )
     props_payload = build_stable_props_payload(slate, include_movement=False)
     props_payload = _dedupe_payload_to_visible_lines(props_payload)
@@ -648,6 +650,15 @@ def _prop_matches_tokens(prop: dict[str, Any], tokens: set[str]) -> bool:
     fixture = str(prop.get("fixtureSlug") or "")
     team = str((prop.get("team") or {}).get("name") or "")
     haystack = slug_key(f"{game} {fixture} {team}")
+    return all(token in haystack for token in tokens)
+
+
+def _fixture_matches_tokens(fixture: dict[str, Any], tokens: set[str]) -> bool:
+    if not tokens:
+        return True
+    name = str(fixture.get("name") or "")
+    slug = str(fixture.get("slug") or "")
+    haystack = slug_key(f"{name} {slug}")
     return all(token in haystack for token in tokens)
 
 
