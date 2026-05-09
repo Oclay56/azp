@@ -477,7 +477,7 @@ def _timestamp_text(value: Any) -> float | None:
 
 async def _cached_schedule(engine: Any, game_date: str) -> dict[str, Any]:
     return await _cached_call(
-        ("schedule", id(engine), game_date),
+        ("schedule", _engine_cache_key(engine), game_date),
         lambda: engine.get_schedule(game_date),
     )
 
@@ -488,7 +488,7 @@ async def _cached_team_roster(
     season: int | None,
 ) -> dict[str, Any]:
     return await _cached_call(
-        ("roster", id(engine), team_id, season),
+        ("roster", _engine_cache_key(engine), team_id, season),
         lambda: engine.get_team_roster(team_id, season=season),
     )
 
@@ -499,7 +499,7 @@ async def _cached_search_players(
     limit: int,
 ) -> dict[str, Any]:
     return await _cached_call(
-        ("search", id(engine), query.lower().strip(), limit),
+        ("search", _engine_cache_key(engine), query.lower().strip(), limit),
         lambda: engine.search_players(query, limit=limit),
     )
 
@@ -511,7 +511,7 @@ async def _cached_player_profile(
     group: str,
 ) -> dict[str, Any]:
     return await _cached_call(
-        ("profile", id(engine), player_id, season, group),
+        ("profile", _engine_cache_key(engine), player_id, season, group),
         lambda: engine.get_player_profile(player_id, season=season, group=group),
     )
 
@@ -524,7 +524,7 @@ async def _cached_recent_history(
     limit: int,
 ) -> dict[str, Any]:
     return await _cached_call(
-        ("history", id(engine), player_id, group, season, limit),
+        ("history", _engine_cache_key(engine), player_id, group, season, limit),
         lambda: engine.get_player_recent_history(
             player_id,
             group=group,
@@ -545,6 +545,16 @@ async def _cached_call(cache_key: tuple[Any, ...], callback: Any) -> Any:
         copy.deepcopy(payload),
     )
     return payload
+
+
+def _engine_cache_key(engine: Any) -> Any:
+    namespace = getattr(engine, "cache_namespace", None)
+    if namespace:
+        return namespace
+    engine_type = type(engine)
+    if engine_type.__module__.startswith("app.mlb_data"):
+        return "mlb-stats-api"
+    return id(engine)
 
 
 def _schedule_team(schedule: dict[str, Any], team_key: str) -> dict[str, Any] | None:

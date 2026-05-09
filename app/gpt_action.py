@@ -182,7 +182,8 @@ async def build_matchup_picks(
     clean_side = _clean_side(side)
     clean_markets = _clean_market_csv(markets) or _clean_market_csv(CORE_GPT_MARKETS)
     target_date = slate_date or _today(timezone_name)
-    clear_mlb_bridge_cache()
+    if _clear_mlb_cache_per_gpt_request():
+        clear_mlb_bridge_cache()
 
     slate = await build_mlb_player_props_slate(
         client=stake_client,
@@ -730,6 +731,11 @@ def _today(timezone_name: str) -> date:
     if not timezone_name:
         return date.today()
     return datetime.now(ZoneInfo(timezone_name)).date()
+
+
+def _clear_mlb_cache_per_gpt_request() -> bool:
+    value = os.getenv("AZP_CLEAR_MLB_CACHE_PER_GPT_REQUEST", "")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _clean_int(value: Any, minimum: int, maximum: int) -> int:
