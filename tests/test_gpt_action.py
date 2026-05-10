@@ -170,6 +170,45 @@ class FakeStakeClientWithRunFlood(FakeStakeClient):
         return payload
 
 
+class FakeStakeClientWithStrongRunFlood(FakeStakeClient):
+    async def get_odds(self, fixture_slug: str):
+        payload = await super().get_odds(fixture_slug)
+        if fixture_slug == "blue-jays-angels":
+            payload["swishMarkets"]["playerProps"].extend(
+                [
+                    {
+                        "competitorName": "Bo Bichette",
+                        "teamName": "Toronto Blue Jays",
+                        "marketName": "runs",
+                        "sportStatType": "player",
+                        "outcomes": [{"line": 0.5, "over": 1.9, "under": 1.78}],
+                    },
+                    {
+                        "competitorName": "Anthony Santander",
+                        "teamName": "Toronto Blue Jays",
+                        "marketName": "runs",
+                        "sportStatType": "player",
+                        "outcomes": [{"line": 0.5, "over": 1.88, "under": 1.8}],
+                    },
+                    {
+                        "competitorName": "Luis Rengifo",
+                        "teamName": "Los Angeles Angels",
+                        "marketName": "runs",
+                        "sportStatType": "player",
+                        "outcomes": [{"line": 0.5, "over": 1.86, "under": 1.77}],
+                    },
+                    {
+                        "competitorName": "Nolan Schanuel",
+                        "teamName": "Los Angeles Angels",
+                        "marketName": "total-bases",
+                        "sportStatType": "player",
+                        "outcomes": [{"line": 0.5, "over": 1.52, "under": 2.35}],
+                    },
+                ]
+            )
+        return payload
+
+
 class FakeMLBEngine:
     async def search_players(self, query: str, limit: int = 10):
         players = {
@@ -398,6 +437,41 @@ class FakeMLBEngine:
         }
 
 
+class FakeMLBEngineWithStrongRuns(FakeMLBEngine):
+    async def get_player_profile(self, player_id: int, season=None, group: str = "hitting"):
+        payload = await super().get_player_profile(player_id, season=season, group=group)
+        if player_id in {666182, 623993, 650859}:
+            payload["player"]["stats"]["runs"] = 36
+        if player_id == 694384:
+            payload["player"]["stats"]["totalBases"] = 20
+        return payload
+
+    async def get_player_recent_history(
+        self,
+        player_id: int,
+        group: str = "hitting",
+        season=None,
+        limit: int = 10,
+    ):
+        payload = await super().get_player_recent_history(
+            player_id,
+            group=group,
+            season=season,
+            limit=limit,
+        )
+        if player_id in {666182, 623993, 650859}:
+            payload["totals"] = {"runs": 15}
+            payload["perGame"] = {"runs": 3.0}
+            for game in payload["games"]:
+                game["stats"] = {"runs": 3.0}
+        if player_id == 694384:
+            payload["totals"] = {"totalBases": 5}
+            payload["perGame"] = {"totalBases": 1.0}
+            for game in payload["games"]:
+                game["stats"] = {"totalBases": 1.0}
+        return payload
+
+
 @pytest.fixture(autouse=True)
 def override_clients():
     clear_mlb_bridge_cache()
@@ -419,6 +493,16 @@ def test_gpt_schema_exposes_read_only_matchup_action():
     response_schema = operation["responses"]["200"]["content"]["application/json"]["schema"]
     assert "properties" in response_schema
     assert "recommendations" in response_schema["properties"]
+    parameters = {
+        parameter["name"]: parameter
+        for parameter in operation["parameters"]
+    }
+    assert parameters["diversityMode"]["schema"]["enum"] == [
+        "balanced",
+        "best_available",
+        "strict_diversity",
+        "longshot",
+    ]
 
 
 def test_gpt_api_key_is_optional_until_env_var_is_set(monkeypatch):
@@ -515,7 +599,7 @@ def test_build_matchup_picks_rejects_unplayable_feed_odds(monkeypatch):
     assert any("playable odds" in note for note in result["notes"])
 
 
-def test_build_matchup_picks_caps_repeated_markets_for_broad_queries(monkeypatch):
+def test_build_matchup_picks_soft_diversity_prefers_close_market_spread(monkeypatch):
     monkeypatch.setenv("AZP_MIN_PLAYABLE_ODDS", "1.10")
     monkeypatch.setenv("AZP_MAX_RECOMMENDATIONS_PER_MARKET", "2")
 
@@ -531,6 +615,69 @@ def test_build_matchup_picks_caps_repeated_markets_for_broad_queries(monkeypatch
             side="under",
             legs=2,
             mode="sgp",
+            diversity_mode="balanced",
+            season=2026,
+            history_limit=5,
+            recommendation_limit=4,
+        )
+    )
+
+    market_counts = result["recommendationDiagnostics"]["marketCounts"]
+    assert market_counts["runs"] == 2
+    assert market_counts["hits"] == 1
+    assert result["recommendationDiagnostics"]["softDiversityPromotions"] >= 1
+    assert result["recommendationDiagnostics"]["discardedByMarketDiversity"] == 0
+    assert any("Soft diversity" in note for note in result["notes"])
+
+
+def test_build_matchup_picks_soft_diversity_keeps_clearly_stronger_repeated_market(monkeypatch):
+    monkeypatch.setenv("AZP_MIN_PLAYABLE_ODDS", "1.10")
+    monkeypatch.setenv("AZP_MAX_RECOMMENDATIONS_PER_MARKET", "2")
+    monkeypatch.setenv("AZP_SOFT_DIVERSITY_SCORE_GAP", "8")
+
+    result = asyncio.run(
+        build_matchup_picks(
+            stake_client=FakeStakeClientWithStrongRunFlood(),
+            mlb_engine=FakeMLBEngineWithStrongRuns(),
+            matchup="Blue Jays vs Angels",
+            slate_date=date(2026, 5, 8),
+            timezone_name="America/New_York",
+            limit=10,
+            markets=None,
+            side="over",
+            legs=2,
+            mode="sgp",
+            diversity_mode="balanced",
+            season=2026,
+            history_limit=5,
+            recommendation_limit=5,
+        )
+    )
+
+    market_counts = result["recommendationDiagnostics"]["marketCounts"]
+    assert market_counts["runs"] == 3
+    assert result["recommendationDiagnostics"]["softDiversityOverrides"] >= 1
+    assert "market_concentration:runs" in result["recommendationDiagnostics"]["concentrationTags"]
+    assert any("Concentration flagged" in note for note in result["notes"])
+
+
+def test_build_matchup_picks_strict_diversity_still_hard_caps_repeated_markets(monkeypatch):
+    monkeypatch.setenv("AZP_MIN_PLAYABLE_ODDS", "1.10")
+    monkeypatch.setenv("AZP_MAX_RECOMMENDATIONS_PER_MARKET", "2")
+
+    result = asyncio.run(
+        build_matchup_picks(
+            stake_client=FakeStakeClientWithRunFlood(),
+            mlb_engine=FakeMLBEngine(),
+            matchup="Blue Jays vs Angels",
+            slate_date=date(2026, 5, 8),
+            timezone_name="America/New_York",
+            limit=10,
+            markets=None,
+            side="under",
+            legs=2,
+            mode="sgp",
+            diversity_mode="strict_diversity",
             season=2026,
             history_limit=5,
             recommendation_limit=10,
@@ -540,7 +687,7 @@ def test_build_matchup_picks_caps_repeated_markets_for_broad_queries(monkeypatch
     market_counts = result["recommendationDiagnostics"]["marketCounts"]
     assert market_counts["runs"] == 2
     assert result["recommendationDiagnostics"]["discardedByMarketDiversity"] == 1
-    assert any("Market diversity capped" in note for note in result["notes"])
+    assert any("Strict diversity capped" in note for note in result["notes"])
 
 
 def test_build_matchup_picks_does_not_cap_explicit_single_market(monkeypatch):
@@ -559,6 +706,7 @@ def test_build_matchup_picks_does_not_cap_explicit_single_market(monkeypatch):
             side="under",
             legs=2,
             mode="sgp",
+            diversity_mode="balanced",
             season=2026,
             history_limit=5,
             recommendation_limit=10,

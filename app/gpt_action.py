@@ -20,6 +20,8 @@ from .slate import DEFAULT_TIMEZONE, build_mlb_player_props_slate
 CORE_GPT_MARKETS = "hits,runs,rbi,total-bases,home-runs,strikeouts,earned-runs"
 DEFAULT_MIN_PLAYABLE_ODDS = 1.10
 DEFAULT_MAX_RECOMMENDATIONS_PER_MARKET = 2
+DEFAULT_SOFT_DIVERSITY_SCORE_GAP = 8
+DIVERSITY_MODES = ("balanced", "best_available", "strict_diversity", "longshot")
 PITCHER_ONLY_MARKETS = {
     "strikeouts",
     "pitcher-strikeouts",
@@ -181,6 +183,7 @@ async def build_matchup_picks(
     side: str = "any",
     legs: int = 2,
     mode: str = "sgp",
+    diversity_mode: str = "balanced",
     season: int | None = None,
     history_limit: int = 5,
     recommendation_limit: int = 10,
@@ -191,6 +194,8 @@ async def build_matchup_picks(
     explicit_markets = _clean_market_csv(markets)
     clean_markets = explicit_markets or _clean_market_csv(CORE_GPT_MARKETS)
     should_diversify_markets = len(explicit_markets) != 1
+    clean_diversity_mode = _clean_diversity_mode(diversity_mode)
+    recommendation_limit_value = _clean_int(recommendation_limit, 1, 25)
     target_date = slate_date or _today(timezone_name)
     matchup_tokens = _matchup_tokens(matchup)
     if _clear_mlb_cache_per_gpt_request():
@@ -220,8 +225,9 @@ async def build_matchup_picks(
         enriched,
         clean_side,
         enable_market_diversity=should_diversify_markets,
+        diversity_mode=clean_diversity_mode,
+        recommendation_limit=recommendation_limit_value,
     )
-    recommendation_limit_value = _clean_int(recommendation_limit, 1, 25)
     recommendations = recommendations[:recommendation_limit_value]
     recommendation_diagnostics["recommendationLimit"] = recommendation_limit_value
     recommendation_diagnostics["returnedCount"] = len(recommendations)
@@ -252,6 +258,7 @@ async def build_matchup_picks(
             "side": clean_side,
             "legs": _clean_int(legs, 1, 12),
             "mode": _clean_mode(mode),
+            "diversityMode": clean_diversity_mode,
         },
         "matchedFixtureCount": matchup_payload["fixtureCount"],
         "availablePropCount": matchup_payload["propCount"],
@@ -317,6 +324,22 @@ def _matchup_pick_parameters() -> list[dict[str, Any]]:
             "required": False,
             "description": "Parlay mode. Use sgp for same-game parlays and standard for one leg per fixture.",
             "schema": {"type": "string", "enum": ["sgp", "standard"], "default": "sgp"},
+        },
+        {
+            "name": "diversityMode",
+            "in": "query",
+            "required": False,
+            "description": (
+                "Recommendation selection style. balanced prefers market spread but "
+                "allows clearly stronger repeated markets; best_available takes the "
+                "top scores; strict_diversity hard-caps repeated markets; longshot "
+                "allows concentration and flags it."
+            ),
+            "schema": {
+                "type": "string",
+                "enum": list(DIVERSITY_MODES),
+                "default": "balanced",
+            },
         },
         {
             "name": "season",
@@ -423,10 +446,13 @@ def _build_recommendations(
     enriched_payload: dict[str, Any],
     side: str,
     enable_market_diversity: bool,
+    diversity_mode: str,
+    recommendation_limit: int,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     picks = []
     diagnostics = _recommendation_diagnostics(
-        enable_market_diversity=enable_market_diversity
+        enable_market_diversity=enable_market_diversity,
+        diversity_mode=diversity_mode,
     )
     min_playable_odds = _minimum_playable_odds()
     diagnostics["minPlayableOdds"] = min_playable_odds
@@ -462,13 +488,20 @@ def _build_recommendations(
     )
     if enable_market_diversity:
         diagnostics["maxRecommendationsPerMarket"] = _max_recommendations_per_market()
-        sorted_picks = _apply_market_diversity(sorted_picks, diagnostics)
+        sorted_picks = _apply_recommendation_diversity(
+            sorted_picks,
+            diagnostics,
+            recommendation_limit,
+        )
     diagnostics["eligibleBeforeDiversity"] = len(picks)
     diagnostics["marketCounts"] = _market_counts(sorted_picks)
     return sorted_picks, diagnostics
 
 
-def _recommendation_diagnostics(enable_market_diversity: bool) -> dict[str, Any]:
+def _recommendation_diagnostics(
+    enable_market_diversity: bool,
+    diversity_mode: str,
+) -> dict[str, Any]:
     return {
         "minPlayableOdds": DEFAULT_MIN_PLAYABLE_ODDS,
         "consideredSides": 0,
@@ -478,12 +511,47 @@ def _recommendation_diagnostics(enable_market_diversity: bool) -> dict[str, Any]
         "discardedByMarketDiversity": 0,
         "eligibleBeforeDiversity": 0,
         "marketDiversityApplied": enable_market_diversity,
+        "diversityMode": diversity_mode,
         "maxRecommendationsPerMarket": None,
+        "softDiversityScoreGap": _soft_diversity_score_gap(),
+        "softDiversityPromotions": 0,
+        "softDiversityOverrides": 0,
+        "softDiversityPromotionDetails": [],
+        "softDiversityOverrideDetails": [],
+        "concentrationTags": [],
         "marketCounts": {},
     }
 
 
-def _apply_market_diversity(
+def _apply_recommendation_diversity(
+    picks: list[dict[str, Any]],
+    diagnostics: dict[str, Any],
+    recommendation_limit: int,
+) -> list[dict[str, Any]]:
+    mode = str(diagnostics.get("diversityMode") or "balanced")
+    target_count = max(1, min(int(recommendation_limit), len(picks) or 1))
+    if mode in {"best_available", "longshot"}:
+        diagnostics["concentrationTags"] = _concentration_tags(
+            picks[:target_count],
+            int(diagnostics["maxRecommendationsPerMarket"]),
+        )
+        return picks
+    if mode == "strict_diversity":
+        selected = _apply_strict_market_diversity(picks, diagnostics)
+        diagnostics["concentrationTags"] = _concentration_tags(
+            selected[:target_count],
+            int(diagnostics["maxRecommendationsPerMarket"]),
+        )
+        return selected
+    selected = _apply_soft_market_diversity(picks, diagnostics, target_count)
+    diagnostics["concentrationTags"] = _concentration_tags(
+        selected[:target_count],
+        int(diagnostics["maxRecommendationsPerMarket"]),
+    )
+    return selected
+
+
+def _apply_strict_market_diversity(
     picks: list[dict[str, Any]],
     diagnostics: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -503,12 +571,140 @@ def _apply_market_diversity(
     return kept
 
 
+def _apply_soft_market_diversity(
+    picks: list[dict[str, Any]],
+    diagnostics: dict[str, Any],
+    recommendation_limit: int,
+) -> list[dict[str, Any]]:
+    max_per_market = int(diagnostics["maxRecommendationsPerMarket"])
+    score_gap = int(diagnostics["softDiversityScoreGap"])
+    selected: list[dict[str, Any]] = []
+    remaining = list(picks)
+    counts: dict[str, int] = {}
+
+    while remaining and len(selected) < recommendation_limit:
+        candidate = remaining[0]
+        market = str(candidate.get("marketKey") or "unknown")
+        if counts.get(market, 0) >= max_per_market:
+            alternative_index = _first_under_market_cap_index(
+                remaining,
+                counts,
+                max_per_market,
+            )
+            if alternative_index is not None:
+                alternative = remaining[alternative_index]
+                gap = _pick_score(candidate) - _pick_score(alternative)
+                if gap <= score_gap:
+                    choice = remaining.pop(alternative_index)
+                    diagnostics["softDiversityPromotions"] += 1
+                    diagnostics["softDiversityPromotionDetails"].append(
+                        _diversity_detail(candidate, choice, gap)
+                    )
+                    _append_selected_pick(selected, choice, counts)
+                    continue
+                diagnostics["softDiversityOverrides"] += 1
+                diagnostics["softDiversityOverrideDetails"].append(
+                    _diversity_detail(candidate, alternative, gap)
+                )
+
+        choice = remaining.pop(0)
+        _append_selected_pick(selected, choice, counts)
+
+    return selected + remaining
+
+
+def _append_selected_pick(
+    selected: list[dict[str, Any]],
+    pick: dict[str, Any],
+    counts: dict[str, int],
+) -> None:
+    selected.append(pick)
+    market = str(pick.get("marketKey") or "unknown")
+    counts[market] = counts.get(market, 0) + 1
+
+
+def _first_under_market_cap_index(
+    picks: list[dict[str, Any]],
+    counts: dict[str, int],
+    max_per_market: int,
+) -> int | None:
+    for index, pick in enumerate(picks):
+        market = str(pick.get("marketKey") or "unknown")
+        if counts.get(market, 0) < max_per_market:
+            return index
+    return None
+
+
+def _diversity_detail(
+    repeated_pick: dict[str, Any],
+    alternative_pick: dict[str, Any],
+    score_gap: int,
+) -> dict[str, Any]:
+    return {
+        "repeatedMarket": repeated_pick.get("marketKey"),
+        "repeatedSelection": repeated_pick.get("selection"),
+        "repeatedScore": _pick_score(repeated_pick),
+        "alternativeMarket": alternative_pick.get("marketKey"),
+        "alternativeSelection": alternative_pick.get("selection"),
+        "alternativeScore": _pick_score(alternative_pick),
+        "scoreGap": score_gap,
+    }
+
+
+def _pick_score(pick: dict[str, Any]) -> int:
+    try:
+        return int(pick.get("score") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _concentration_tags(
+    picks: list[dict[str, Any]],
+    max_per_market: int,
+) -> list[str]:
+    tags: list[str] = []
+    market_counts = _market_counts(picks)
+    for market, count in market_counts.items():
+        if count > max_per_market:
+            tags.append(f"market_concentration:{market}")
+
+    side_counts = _side_counts(picks)
+    for side, count in side_counts.items():
+        if side in {"over", "under"} and count >= 3:
+            tags.append(f"same_side_cluster:{side}")
+            if side == "under":
+                tags.append("low_scoring_script")
+            elif side == "over":
+                tags.append("high_scoring_script")
+
+    if tags and any(count >= 2 for count in _fixture_counts(picks).values()):
+        tags.append("sgp_repricing_sensitive")
+
+    return sorted(set(tags))
+
+
 def _market_counts(picks: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for pick in picks:
         market = str(pick.get("marketKey") or "unknown")
         counts[market] = counts.get(market, 0) + 1
     return {market: counts[market] for market in sorted(counts)}
+
+
+def _side_counts(picks: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for pick in picks:
+        side = str(pick.get("side") or "unknown")
+        counts[side] = counts.get(side, 0) + 1
+    return {side: counts[side] for side in sorted(counts)}
+
+
+def _fixture_counts(picks: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for pick in picks:
+        fixture = str(pick.get("fixtureSlug") or "unknown")
+        counts[fixture] = counts.get(fixture, 0) + 1
+    return {fixture: counts[fixture] for fixture in sorted(counts)}
 
 
 def _pitcher_prop_is_probable_pitcher(prop: dict[str, Any]) -> bool:
@@ -746,9 +942,30 @@ def _response_notes(
         discarded_diversity = int(diagnostics.get("discardedByMarketDiversity") or 0)
         if discarded_diversity:
             notes.append(
-                "Market diversity capped repeated markets at "
+                "Strict diversity capped repeated markets at "
                 f"{diagnostics.get('maxRecommendationsPerMarket')} per market; "
                 f"removed {discarded_diversity} lower-ranked repeated-market legs."
+            )
+        soft_promotions = int(diagnostics.get("softDiversityPromotions") or 0)
+        if soft_promotions:
+            notes.append(
+                "Soft diversity promoted "
+                f"{soft_promotions} close-score alternative market legs instead of "
+                "overloading one market."
+            )
+        soft_overrides = int(diagnostics.get("softDiversityOverrides") or 0)
+        if soft_overrides:
+            notes.append(
+                "Soft diversity allowed "
+                f"{soft_overrides} repeated-market legs because their score gap beat "
+                f"the alternative threshold ({diagnostics.get('softDiversityScoreGap')})."
+            )
+        concentration_tags = diagnostics.get("concentrationTags") or []
+        if concentration_tags:
+            notes.append(
+                "Concentration flagged: "
+                f"{', '.join(str(tag) for tag in concentration_tags)}. "
+                "Stake SGP quote is still needed before treating parlay odds as final."
             )
     if (
         requested_legs is not None
@@ -859,6 +1076,11 @@ def _clean_mode(value: Any) -> str:
     return cleaned if cleaned in {"sgp", "standard"} else "sgp"
 
 
+def _clean_diversity_mode(value: Any) -> str:
+    cleaned = str(value or "balanced").strip().lower().replace("-", "_")
+    return cleaned if cleaned in DIVERSITY_MODES else "balanced"
+
+
 def _today(timezone_name: str) -> date:
     if not timezone_name:
         return date.today()
@@ -882,6 +1104,13 @@ def _max_recommendations_per_market() -> int:
     if value is None:
         return DEFAULT_MAX_RECOMMENDATIONS_PER_MARKET
     return max(1, min(value, 25))
+
+
+def _soft_diversity_score_gap() -> int:
+    value = _int_or_none(os.getenv("AZP_SOFT_DIVERSITY_SCORE_GAP"))
+    if value is None:
+        return DEFAULT_SOFT_DIVERSITY_SCORE_GAP
+    return max(0, min(value, 50))
 
 
 def _clean_int(value: Any, minimum: int, maximum: int) -> int:
