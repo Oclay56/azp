@@ -97,3 +97,11 @@ create index if not exists idx_recommendation_settlements_slate_date
 
 create index if not exists idx_recommendation_settlements_decision
     on public.recommendation_settlements (decision_outcome, settled_at desc);
+
+alter table public.recommendation_requests enable row level security;
+alter table public.recommendation_legs enable row level security;
+alter table public.recommendation_settlements enable row level security;
+
+revoke all on public.recommendation_requests from anon, authenticated;
+revoke all on public.recommendation_legs from anon, authenticated;
+revoke all on public.recommendation_settlements from anon, authenticated;
