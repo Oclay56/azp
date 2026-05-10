@@ -83,6 +83,14 @@ custom_gpt_action/custom-gpt-instructions.md
 
 into your Custom GPT instructions.
 
+The cleaned analyzer-layer guidance lives here:
+
+```text
+custom_gpt_action/analyzer-layer-notes.md
+```
+
+That file explains which parts of the imported edge/umpire/parlay notes are implemented, corrected, or intentionally deferred.
+
 ## Important Reality Check
 
 If you keep this local, your PC must be running both:

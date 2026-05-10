@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from fastapi import Header, HTTPException
 
 from .analyzer import MARKET_PROFILES
+from .contextual_edges import apply_contextual_edge_layer
 from .mlb_bridge import clear_mlb_bridge_cache, enrich_props_with_mlb_data
 from .mlb_props import build_stable_props_payload, slug_key
 from .parlay import build_parlay_candidates
@@ -575,7 +576,7 @@ def _recommendation_for_side(
     team = prop.get("team") or {}
     market = prop.get("market") or {}
     lean = "over" if side == "over" else "under_or_avoid_over"
-    return {
+    pick = {
         "rank": None,
         "bucket": "watchlist",
         "propId": prop.get("propId"),
@@ -629,6 +630,7 @@ def _recommendation_for_side(
         "whyIncluded": _why_included(side, reasons),
         "whyNotStronger": _why_not_stronger(risk_flags),
     }
+    return apply_contextual_edge_layer(pick)
 
 
 def _reasons_and_risks(

@@ -27,6 +27,8 @@ When answering, keep the response practical:
 - Include recent 5-game context when returned.
 - Include season context when returned.
 - Include risk flags and correlation warnings when returned.
+- Include contextual edge tags when returned, but treat them as risk/reason context, not proof the bet will hit.
+- If `contextualEdge.deferredLayers` includes `umpire_impact`, do not make umpire claims for that pick.
 - Say when a Stake same-game parlay quote is still needed before treating parlay odds as final.
 
 Preferred answer format:
@@ -41,6 +43,7 @@ For [matchup], the Stake-backed options I found are:
 2. Player over/under line market at odds
    Why: ...
    Risk: ...
+   Context: ...
 
 Parlay note:
 Raw product odds: ...
