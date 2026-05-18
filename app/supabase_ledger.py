@@ -117,6 +117,7 @@ def _gpt_decision_payloads(
             "request_json": request_body,
             "response_json": response,
             "validation_json": response.get("validation") or {},
+            "metadata_json": _decision_metadata(response, request_body),
         }
     ]
     leg_rows = [
@@ -165,6 +166,32 @@ def _gpt_decision_leg_payload(
         "playable": bool(selection.get("playable")),
         "status": availability.get("status") or selection.get("status"),
         "selection_json": selection,
+        "decision_profile_json": selection.get("decisionProfile") or {},
+        "risk_flags_json": selection.get("riskFlags")
+        or (selection.get("decisionProfile") or {}).get("riskFlags")
+        or [],
+        "settlement_status": "unsettled",
+        "actual_stat": None,
+        "settled_at": None,
+        "settlement_confidence": None,
+        "settlement_source": None,
+    }
+
+
+def _decision_metadata(
+    response: dict[str, Any],
+    request_body: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "mode": request_body.get("mode"),
+        "targetOddsMin": request_body.get("targetOddsMin") or request_body.get("target_odds_min"),
+        "targetOddsMax": request_body.get("targetOddsMax") or request_body.get("target_odds_max"),
+        "minLegs": request_body.get("minLegs") or request_body.get("min_legs"),
+        "maxLegs": request_body.get("maxLegs") or request_body.get("max_legs"),
+        "validationMode": (response.get("validation") or {}).get("validationMode"),
+        "oddsPolicy": (response.get("validation") or {}).get("oddsPolicy"),
+        "selectionCount": response.get("selectionCount"),
+        "source": response.get("source"),
     }
 
 

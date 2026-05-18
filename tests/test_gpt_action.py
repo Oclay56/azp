@@ -15,6 +15,7 @@ from app.gpt_action import (
     build_prop_context_batch,
     build_prop_page,
     build_probable_pitchers,
+    build_slip_candidates,
     require_gpt_api_key_value,
     validate_gpt_selections,
 )
@@ -234,12 +235,13 @@ class FakeMLBEngine:
 
 
 @pytest.fixture(autouse=True)
-def override_clients(tmp_path):
+def override_clients(monkeypatch, tmp_path):
     app.dependency_overrides[get_stake_client] = lambda: FakeStakeClient()
     app.dependency_overrides[get_mlb_engine] = lambda: FakeMLBEngine()
     app.dependency_overrides[get_gpt_store] = lambda: GptActionStore(
         tmp_path / "gpt.sqlite"
     )
+    monkeypatch.setenv("AZP_LOCAL_ARCHIVE_DIR", str(tmp_path / "archives"))
     yield
     app.dependency_overrides.clear()
 
@@ -257,6 +259,7 @@ def test_gpt_schema_exposes_gpt_owned_data_actions_only():
     assert path_ids["/mlb/matchup/{matchup}/board-summary"] == "getBoardSummary"
     assert path_ids["/mlb/matchup/{matchup}/prop-page"] == "getPropPage"
     assert path_ids["/mlb/matchup/{matchup}/comparison-board"] == "getComparisonBoard"
+    assert path_ids["/mlb/build-slip-candidates"] == "buildSlipCandidates"
     assert path_ids["/mlb/player/{playerId}/context"] == "getPlayerMlbContext"
     assert path_ids["/mlb/prop-context-batch"] == "getPropContextBatch"
     assert path_ids["/mlb/validate-selections"] == "validateSelections"
@@ -373,6 +376,14 @@ def test_comparison_board_adds_compact_mlb_metrics_without_final_picks():
     assert springer["metrics"]["recentAverage"] == 0.4
     assert springer["metrics"]["seasonAverage"] == 0.75
     assert springer["metrics"]["recentHitRateUnder"] == 1.0
+    assert springer["metrics"]["windows"]["5"]["average"] == 0.4
+    assert springer["decisionProfile"]["finalStatus"] in {
+        "playable",
+        "playable_but_volatile",
+        "borderline",
+    }
+    assert result["decisionProfileSummary"]["finalStatus"]
+    assert result["marketHeatmap"][0]["marketKey"] == "hits"
     assert springer["helperStrength"] is not None
     assert "recommendations" not in result
 
@@ -537,6 +548,11 @@ def test_validate_gpt_selections_checks_current_stake_line_side_and_odds():
 
     assert result["valid"] is False
     assert result["results"][0]["status"] == "line_mismatch"
+    assert result["results"][0]["lineMatch"] is False
+    assert result["results"][0]["oddsMatch"] is True
+    assert result["results"][0]["rejectReasons"] == ["line_mismatch"]
+    assert result["results"][0]["verificationSource"] == "stake_feed"
+    assert result["results"][0]["uiVerification"] == "not_available"
     assert result["results"][0]["current"]["line"] == 0.5
 
 
@@ -676,3 +692,31 @@ def test_save_gpt_decision_route_persists_gpt_choice_without_azp_ledger():
     assert body["validation"]["valid"] is True
     assert body["gptDecisionLedger"]["saved"] is True
     assert "recommendationLedger" not in body
+
+
+def test_slip_candidate_builder_returns_candidate_shape_not_final_picks():
+    result = asyncio.run(
+        build_slip_candidates(
+            stake_client=FakeStakeClient(),
+            mlb_engine=FakeMLBEngine(),
+            matchup="Blue Jays vs Angels",
+            slate_date=date(2026, 5, 8),
+            timezone_name="America/New_York",
+            limit=10,
+            markets="hits",
+            side="under",
+            season=2026,
+            target_odds_min=2.0,
+            min_legs=1,
+            max_legs=3,
+            mode="mega_under",
+        )
+    )
+
+    assert result["purpose"] == "slip_candidate_builder"
+    assert result["decisionOwner"] == "custom_gpt"
+    assert result["builderRole"] == "candidate_support_not_final_recommendation"
+    assert result["bestCleanSlip"]["legCount"] >= 1
+    assert result["bestCleanSlip"]["rawProductOdds"] >= 1
+    assert result["bestCleanSlip"]["integrityReport"]["requiresFinalUiQuote"] is True
+    assert "recommendations" not in result

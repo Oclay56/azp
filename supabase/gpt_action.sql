@@ -7,7 +7,8 @@ create table if not exists public.gpt_decision_requests (
     prompt text,
     request_json jsonb not null,
     response_json jsonb not null,
-    validation_json jsonb not null
+    validation_json jsonb not null,
+    metadata_json jsonb not null default '{}'::jsonb
 );
 
 alter table public.gpt_decision_requests
@@ -18,6 +19,9 @@ alter table public.gpt_decision_requests
 
 alter table public.gpt_decision_requests
     add column if not exists validation_json jsonb;
+
+alter table public.gpt_decision_requests
+    add column if not exists metadata_json jsonb not null default '{}'::jsonb;
 
 update public.gpt_decision_requests
 set
@@ -52,8 +56,36 @@ create table if not exists public.gpt_decision_legs (
     odds numeric,
     playable boolean not null default false,
     status text,
-    selection_json jsonb not null
+    selection_json jsonb not null,
+    decision_profile_json jsonb not null default '{}'::jsonb,
+    risk_flags_json jsonb not null default '[]'::jsonb,
+    settlement_status text not null default 'unsettled',
+    actual_stat numeric,
+    settled_at timestamptz,
+    settlement_confidence numeric,
+    settlement_source text
 );
+
+alter table public.gpt_decision_legs
+    add column if not exists decision_profile_json jsonb not null default '{}'::jsonb;
+
+alter table public.gpt_decision_legs
+    add column if not exists risk_flags_json jsonb not null default '[]'::jsonb;
+
+alter table public.gpt_decision_legs
+    add column if not exists settlement_status text not null default 'unsettled';
+
+alter table public.gpt_decision_legs
+    add column if not exists actual_stat numeric;
+
+alter table public.gpt_decision_legs
+    add column if not exists settled_at timestamptz;
+
+alter table public.gpt_decision_legs
+    add column if not exists settlement_confidence numeric;
+
+alter table public.gpt_decision_legs
+    add column if not exists settlement_source text;
 
 create table if not exists public.market_mappings (
     sport text not null default 'mlb',

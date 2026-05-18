@@ -9,6 +9,14 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Header, HTTPException
 
+from .decision_profiles import (
+    build_decision_profile,
+    decision_profile_summary,
+    evidence_windows,
+    market_heatmap,
+    season_evidence,
+    trend_labels,
+)
 from .mlb_bridge import (
     clear_mlb_bridge_cache,
     enrich_props_with_mlb_data,
@@ -16,6 +24,7 @@ from .mlb_bridge import (
 )
 from .mlb_props import build_stable_props_payload, slug_key
 from .slate import DEFAULT_TIMEZONE, build_mlb_matchups, build_mlb_player_props_slate
+from .slip_builder import build_slip_candidate_response
 
 
 DEFAULT_MIN_PLAYABLE_ODDS = 1.10
@@ -130,6 +139,14 @@ def build_gpt_action_openapi_schema(server_url: str) -> dict[str, Any]:
                         _season_param(),
                         _history_limit_param(),
                     ],
+                )
+            },
+            "/mlb/build-slip-candidates": {
+                "post": _operation(
+                    "buildSlipCandidates",
+                    "Build constrained slip candidates",
+                    "Assembles candidate slips from Stake-backed comparison rows. This is support data, not final GPT recommendation authority.",
+                    request_body=_slip_candidate_request_body(),
                 )
             },
             "/mlb/matchup/{matchup}/probable-pitchers": {
@@ -398,6 +415,7 @@ async def build_board_summary(
         "sides": _count_by(filtered, "side"),
         "lineSources": _count_by(filtered, "lineSource"),
         "contextCoverage": _context_coverage(filtered),
+        "marketHeatmap": market_heatmap([_compact_selection_row(row) for row in filtered]),
         "warningCounts": _warning_counts(filtered),
         "warnings": _summary_warnings(props_payload, filtered),
         "nextSteps": [
@@ -534,11 +552,72 @@ async def build_comparison_board(
             context_quality=context_quality,
         ),
         **pagination["meta"],
+        "decisionProfileSummary": decision_profile_summary(rows),
+        "marketHeatmap": market_heatmap(rows),
         "rows": pagination["items"],
         "notes": [
             "Rows are compact helper metrics, not AZP picks.",
             "Use getPropContextBatch for full finalist context before validateSelections.",
         ],
+        "generatedAt": _utc_now(),
+    }
+
+
+async def build_slip_candidates(
+    stake_client: Any,
+    mlb_engine: Any,
+    matchup: str,
+    slate_date: date | None = None,
+    timezone_name: str = DEFAULT_TIMEZONE,
+    limit: int = DEFAULT_BOARD_LIMIT,
+    markets: str | None = None,
+    side: str = "any",
+    season: int | None = None,
+    history_limit: int = 15,
+    target_odds_min: float = 2.0,
+    target_odds_max: float | None = None,
+    min_legs: int = 2,
+    max_legs: int = 8,
+    mode: str = "balanced",
+    quality_floor: float = 55.0,
+    allow_no_pick: bool = True,
+) -> dict[str, Any]:
+    comparison = await build_comparison_board(
+        stake_client=stake_client,
+        mlb_engine=mlb_engine,
+        matchup=matchup,
+        slate_date=slate_date,
+        timezone_name=timezone_name,
+        limit=limit,
+        markets=markets,
+        side=side,
+        line_mode="primary",
+        page=1,
+        page_size=50,
+        primary_only=False,
+        playable_only=True,
+        context_quality="supported",
+        season=season or (slate_date.year if slate_date else None),
+        history_limit=history_limit,
+    )
+    response = build_slip_candidate_response(
+        comparison.get("rows") or [],
+        target_odds_min=max(1.0, _float_or_none(target_odds_min) or 2.0),
+        target_odds_max=_float_or_none(target_odds_max),
+        min_legs=_clean_int(min_legs, 1, 25),
+        max_legs=_clean_int(max_legs, 1, 25),
+        preferred_markets=sorted(_clean_market_csv(markets)),
+        preferred_side=_clean_side(side),
+        mode=mode,
+        quality_floor=max(0.0, min(_float_or_none(quality_floor) or 55.0, 100.0)),
+        allow_no_pick=bool(allow_no_pick),
+    )
+    return {
+        **response,
+        "matchup": matchup,
+        "date": comparison.get("date"),
+        "timezone": comparison.get("timezone"),
+        "comparisonFilters": comparison.get("filters"),
         "generatedAt": _utc_now(),
     }
 
@@ -872,7 +951,7 @@ async def build_gpt_decision_result(
         odds_tolerance=odds_tolerance,
     )
     accepted = [
-        result["current"]
+        _accepted_selection_from_validation(result)
         for result in validation["results"]
         if result.get("valid") and result.get("current")
     ]
@@ -984,6 +1063,8 @@ def _availability_flags(prop: dict[str, Any], side: str | None = None) -> dict[s
         "source": "stake_odds_api",
         "status": prop.get("status"),
         "playable": playable,
+        "visibleOnStakeUi": None,
+        "uiVerification": "not_available",
         "executionConfirmed": False,
         "playableConfidence": "feed_primary" if is_primary_line else "feed_only",
         "lineSource": line_source,
@@ -1040,6 +1121,15 @@ async def _prop_context_response(
             max_limit=history_limit,
         )
 
+    metrics = _selection_metrics(selection, prop, stat_context)
+    flags = _comparison_flags(selection, prop, stat_context)
+    profile = build_decision_profile(
+        selection=selection,
+        stat_context=stat_context,
+        metrics=metrics,
+        flags=flags,
+        mlb_match=prop.get("mlbMatch"),
+    )
     return {
         "decisionOwner": "custom_gpt",
         "source": "stake_odds_api+mlb_stats_api",
@@ -1057,9 +1147,40 @@ async def _prop_context_response(
         "statContext": stat_context,
         "season": _season_context(prop.get("mlbProfile")),
         "recent": recent,
+        "metrics": metrics,
+        "decisionProfile": profile,
+        "flags": flags,
         "notes": _player_context_notes(prop),
         "generatedAt": _utc_now(),
     }
+
+
+def _accepted_selection_from_validation(result: dict[str, Any]) -> dict[str, Any]:
+    current = dict(result.get("current") or {})
+    requested = result.get("requested") or {}
+    if requested.get("decisionProfile"):
+        current["decisionProfile"] = requested.get("decisionProfile")
+    if requested.get("riskFlags"):
+        current["riskFlags"] = requested.get("riskFlags")
+    current["validationResult"] = {
+        key: result.get(key)
+        for key in (
+            "status",
+            "validationMode",
+            "oddsPolicy",
+            "oddsTolerance",
+            "verificationSource",
+            "uiVerification",
+            "sideMatch",
+            "lineMatch",
+            "oddsMatch",
+            "playableMatch",
+            "identityMatch",
+            "checkedAt",
+        )
+        if key in result
+    }
+    return current
 
 
 async def _recent_windows(
@@ -1095,6 +1216,9 @@ def _validate_selection(
     prop_id = requested.get("propId")
     side = _clean_side(requested.get("side") or "any")
     current = _find_selection(current_selections, selection_id or prop_id, side=side)
+    if current is None and not (selection_id or prop_id):
+        current = _find_selection_by_requested_fields(current_selections, requested, side=side)
+    checked_at = _utc_now()
     base = {
         "index": index,
         "requested": requested,
@@ -1102,32 +1226,84 @@ def _validate_selection(
         "validationMode": validation_mode,
         "oddsPolicy": odds_policy,
         "oddsTolerance": odds_tolerance,
+        "verificationSource": "stake_feed",
+        "uiVerification": "not_available",
+        "checkedAt": checked_at,
         "executionReady": False,
     }
     if current is None:
-        return {**base, "valid": False, "status": "missing_selection"}
-    if side != "any" and current.get("side") != side:
-        return {**base, "valid": False, "status": "side_mismatch"}
-    if not _numbers_match(requested.get("line"), current.get("line")):
-        return {**base, "valid": False, "status": "line_mismatch"}
-    if not _odds_acceptable(
+        return {
+            **base,
+            "valid": False,
+            "status": "missing_selection",
+            "rejectReasons": ["missing_selection"],
+        }
+    side_match = side == "any" or current.get("side") == side
+    line_match = _numbers_match(requested.get("line"), current.get("line"))
+    odds_match = _odds_acceptable(
         requested.get("odds"),
         current.get("odds"),
         policy=odds_policy,
         tolerance=odds_tolerance,
-    ):
-        return {**base, "valid": False, "status": "odds_mismatch"}
-    if not current.get("playable"):
-        return {**base, "valid": False, "status": "unplayable"}
+    )
+    playable_match = bool(current.get("playable"))
+    identity_match = _requested_identity_matches(requested, current)
+    checks = {
+        "sideMatch": side_match,
+        "lineMatch": line_match,
+        "oddsMatch": odds_match,
+        "playableMatch": playable_match,
+        "identityMatch": identity_match,
+        "propIdMatch": not prop_id or str(prop_id) == str(current.get("propId") or ""),
+        "selectionIdMatch": not selection_id
+        or str(selection_id) == str(current.get("selectionId") or ""),
+    }
+    base = {**base, **checks}
+    if not identity_match:
+        return {
+            **base,
+            "valid": False,
+            "status": "identity_mismatch",
+            "rejectReasons": ["identity_mismatch"],
+        }
+    if not side_match:
+        return {
+            **base,
+            "valid": False,
+            "status": "side_mismatch",
+            "rejectReasons": ["side_mismatch"],
+        }
+    if not line_match:
+        return {
+            **base,
+            "valid": False,
+            "status": "line_mismatch",
+            "rejectReasons": ["line_mismatch"],
+        }
+    if not odds_match:
+        return {
+            **base,
+            "valid": False,
+            "status": "odds_mismatch",
+            "rejectReasons": ["odds_mismatch"],
+        }
+    if not playable_match:
+        return {
+            **base,
+            "valid": False,
+            "status": "unplayable",
+            "rejectReasons": ["unplayable"],
+        }
     if validation_mode == "execution_ready":
         return {
             **base,
             "valid": False,
             "status": "quote_required",
             "quoteRequired": True,
+            "rejectReasons": ["stake_ui_quote_required"],
             "message": "Stake feed matched, but no final bet-slip quote was confirmed.",
         }
-    return {**base, "valid": True, "status": "valid"}
+    return {**base, "valid": True, "status": "valid", "rejectReasons": []}
 
 
 def _find_selection(
@@ -1145,6 +1321,57 @@ def _find_selection(
         }:
             return selection
     return None
+
+
+def _find_selection_by_requested_fields(
+    selections: list[dict[str, Any]],
+    requested: dict[str, Any],
+    side: str | None = None,
+) -> dict[str, Any] | None:
+    for selection in selections:
+        if side and side != "any" and selection.get("side") != side:
+            continue
+        if not _numbers_match(requested.get("line"), selection.get("line")):
+            continue
+        if requested.get("odds") is not None and not _numbers_match(
+            requested.get("odds"),
+            selection.get("odds"),
+            tolerance=0.01,
+        ):
+            continue
+        if _requested_identity_matches(requested, selection):
+            return selection
+    return None
+
+
+def _requested_identity_matches(
+    requested: dict[str, Any],
+    current: dict[str, Any],
+) -> bool:
+    checks = [
+        ("player", "name"),
+        ("team", "name"),
+        ("market", "key"),
+        ("market", "name"),
+        ("fixtureSlug", None),
+    ]
+    for field, nested in checks:
+        requested_value = _requested_identity_value(requested, field, nested)
+        if not requested_value:
+            continue
+        current_value = _requested_identity_value(current, field, nested)
+        if slug_key(requested_value) != slug_key(current_value):
+            return False
+    return True
+
+
+def _requested_identity_value(row: dict[str, Any], field: str, nested: str | None) -> Any:
+    value = row.get(field)
+    if isinstance(value, dict):
+        if nested and value.get(nested) is not None:
+            return value.get(nested)
+        return value.get("key") or value.get("name")
+    return value
 
 
 def _find_prop(props: list[dict[str, Any]], prop_id: Any) -> dict[str, Any] | None:
@@ -1290,12 +1517,20 @@ def _comparison_selection_row(
     )
     metrics = _selection_metrics(selection, prop, stat_context)
     flags = _comparison_flags(selection, prop, stat_context)
+    profile = build_decision_profile(
+        selection=selection,
+        stat_context=stat_context,
+        metrics=metrics,
+        flags=flags,
+        mlb_match=prop.get("mlbMatch"),
+    )
     return {
         **_compact_selection_row(selection),
         "mlbMatch": prop.get("mlbMatch"),
         "matchupGame": _compact_game(prop.get("mlbGame")),
         "metrics": metrics,
         "flags": flags,
+        "decisionProfile": profile,
         "helperStrength": metrics.get("agreementScore"),
     }
 
@@ -1324,6 +1559,9 @@ def _selection_metrics(
     recent_margin = _side_margin(recent_average, line, side)
     season_margin = _side_margin(season_average, line, side)
     agreement = _agreement_score(recent_margin, season_margin, hit_rates, side)
+    windows = evidence_windows(recent, stat_key, line, side)
+    season = season_evidence(prop.get("mlbProfile"), stat_key, line, side)
+    labels = trend_labels(windows, season, side)
     return {
         "statKey": stat_key,
         "recentGamesUsed": recent.get("gamesUsed"),
@@ -1334,6 +1572,9 @@ def _selection_metrics(
         "recentSideMargin": recent_margin,
         "seasonSideMargin": season_margin,
         "agreementScore": agreement,
+        "windows": windows,
+        "season": season,
+        "trendLabels": labels,
     }
 
 
@@ -2090,6 +2331,46 @@ def _prop_context_batch_request_body() -> dict[str, Any]:
                         },
                     },
                     "required": ["matchup", "selections"],
+                    "additionalProperties": True,
+                }
+            }
+        },
+    }
+
+
+def _slip_candidate_request_body() -> dict[str, Any]:
+    return {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "matchup": {"type": "string"},
+                        "date": {"type": "string", "format": "date"},
+                        "markets": {"type": "string"},
+                        "side": {"type": "string", "enum": ["any", "over", "under"]},
+                        "targetOddsMin": {"type": "number", "minimum": 1},
+                        "targetOddsMax": {"type": "number", "minimum": 1},
+                        "minLegs": {"type": "integer", "minimum": 1, "maximum": 25},
+                        "maxLegs": {"type": "integer", "minimum": 1, "maximum": 25},
+                        "mode": {
+                            "type": "string",
+                            "enum": [
+                                "balanced",
+                                "best_available",
+                                "safe_volume",
+                                "compact_power",
+                                "mega_under",
+                                "strict_diversity",
+                                "longshot",
+                            ],
+                        },
+                        "qualityFloor": {"type": "number", "minimum": 0, "maximum": 100},
+                        "allowNoPick": {"type": "boolean"},
+                        "historyLimit": {"type": "integer", "minimum": 1, "maximum": 15},
+                    },
+                    "required": ["matchup"],
                     "additionalProperties": True,
                 }
             }

@@ -35,6 +35,10 @@ def test_gpt_decision_payloads_match_supabase_tables():
                     "odds": 2.9,
                     "playable": True,
                     "availability": {"status": "active"},
+                    "decisionProfile": {
+                        "finalStatus": "playable",
+                        "riskFlags": ["recent_and_season_agree"],
+                    },
                 }
             ],
         },
@@ -48,6 +52,9 @@ def test_gpt_decision_payloads_match_supabase_tables():
     assert legs[0]["selection_id"] == "prop-1:under"
     assert legs[0]["market_key"] == "hits"
     assert legs[0]["playable"] is True
+    assert legs[0]["decision_profile_json"]["finalStatus"] == "playable"
+    assert legs[0]["risk_flags_json"] == ["recent_and_season_agree"]
+    assert legs[0]["settlement_status"] == "unsettled"
 
 
 def test_supabase_schema_can_upgrade_existing_decision_tables():
@@ -57,3 +64,5 @@ def test_supabase_schema_can_upgrade_existing_decision_tables():
     assert "add column if not exists request_json" in sql
     assert "add column if not exists response_json" in sql
     assert "add column if not exists validation_json" in sql
+    assert "add column if not exists decision_profile_json" in sql
+    assert "add column if not exists settlement_status" in sql

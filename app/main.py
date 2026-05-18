@@ -7,6 +7,11 @@ from typing import Any
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Path, Query, Request
 
+from .local_archive import (
+    archive_gpt_decision,
+    archive_market_mappings,
+    archive_status,
+)
 from .gpt_action import (
     build_available_markets,
     build_board_summary,
@@ -24,6 +29,7 @@ from .gpt_action import (
     build_prop_page,
     build_probable_pitchers,
     require_gpt_api_key,
+    build_slip_candidates,
     validate_gpt_selections,
 )
 from .mlb_data import MLBAPIError, MLBDataEngine, MLBStatsClient, build_mlb_http_client
@@ -75,6 +81,13 @@ async def health() -> dict[str, str]:
 @app.get("/gpt/health")
 async def gpt_health(_: None = Depends(require_gpt_api_key)) -> dict[str, str]:
     return {"status": "ok", "service": "azp-gpt-data-api"}
+
+
+@app.get("/archive/status")
+async def local_archive_status(
+    _: None = Depends(require_gpt_api_key),
+) -> dict[str, Any]:
+    return archive_status()
 
 
 @app.get("/gpt/privacy", include_in_schema=False)
@@ -255,6 +268,37 @@ async def mlb_matchup_comparison_board(
     )
 
 
+@app.post("/mlb/build-slip-candidates")
+async def mlb_build_slip_candidates(
+    payload: dict[str, Any] = Body(...),
+    _: None = Depends(require_gpt_api_key),
+    client: StakeClient = Depends(get_stake_client),
+    engine: MLBDataEngine = Depends(get_mlb_engine),
+) -> Any:
+    matchup = _required_body_text(payload, "matchup")
+    slate_date = _date_from_body(payload)
+    return await _call_data_sources(
+        build_slip_candidates,
+        client,
+        engine,
+        matchup,
+        slate_date,
+        _timezone_name(),
+        int(payload.get("limit") or 25),
+        payload.get("markets") or payload.get("market"),
+        payload.get("side") or "any",
+        payload.get("season") or (slate_date.year if slate_date else None),
+        int(payload.get("historyLimit") or payload.get("history_limit") or 15),
+        payload.get("targetOddsMin") or payload.get("target_odds_min") or 2.0,
+        payload.get("targetOddsMax") or payload.get("target_odds_max"),
+        int(payload.get("minLegs") or payload.get("min_legs") or 2),
+        int(payload.get("maxLegs") or payload.get("max_legs") or 8),
+        payload.get("mode") or "balanced",
+        payload.get("qualityFloor") or payload.get("quality_floor") or 55.0,
+        _bool_from_body(payload, "allowNoPick", "allow_no_pick", True),
+    )
+
+
 @app.get("/mlb/matchup/{matchup}/probable-pitchers")
 async def mlb_matchup_probable_pitchers(
     matchup: str = Path(..., min_length=2),
@@ -289,7 +333,10 @@ async def mlb_matchup_market_map(
         limit,
     )
     saved = store.save_market_mappings(response.get("marketMap") or [])
-    response["marketMappingStore"] = {"localSaved": saved["marketMappingsSaved"]}
+    response["marketMappingStore"] = {
+        "localSaved": saved["marketMappingsSaved"],
+        "localArchive": archive_market_mappings(response),
+    }
     if supabase_ledger_enabled() and response.get("marketMap"):
         try:
             supabase_result = await sync_market_mappings_to_supabase(
@@ -468,6 +515,11 @@ async def mlb_save_gpt_decision(
         "saved": True,
         "decisionId": saved["decisionId"],
         "legsSaved": saved["gptDecisionLegsInserted"],
+        "localArchive": archive_gpt_decision(
+            response,
+            request_body=payload,
+            decision_id=saved["decisionId"],
+        ),
         "supabaseSynced": False,
     }
     if supabase_ledger_enabled():
@@ -591,3 +643,29 @@ def _date_from_body(payload: dict[str, Any]) -> date | None:
         return date.fromisoformat(str(raw_date))
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="date must be YYYY-MM-DD") from exc
+
+
+def _bool_from_body(
+    payload: dict[str, Any],
+    camel_key: str,
+    snake_key: str,
+    default: bool,
+) -> bool:
+    raw_value = payload.get(camel_key, payload.get(snake_key, default))
+    if isinstance(raw_value, bool):
+        return raw_value
+    if raw_value is None:
+        return default
+    if isinstance(raw_value, (int, float)):
+        return raw_value != 0
+
+    text_value = str(raw_value).strip().lower()
+    if text_value in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text_value in {"0", "false", "no", "n", "off"}:
+        return False
+
+    raise HTTPException(
+        status_code=422,
+        detail=f"{camel_key} must be a boolean value",
+    )

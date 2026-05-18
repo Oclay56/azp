@@ -8,6 +8,7 @@ The Custom GPT makes the final decision. The Render backend only:
 - normalizes players, teams, markets, lines, sides, and odds
 - pulls MLB Stats API context for players and props
 - validates GPT-selected props against the current Stake board
+- returns decision profiles, market heatmaps, and constrained slip candidates for GPT review
 - saves GPT-authored decisions and market mappings when storage is configured
 
 It does not place bets, log in to Stake, scrape account pages, or run the old AZP analyzer as the final pick engine.
@@ -29,7 +30,8 @@ Authentication can stay `None` unless `AZP_GPT_API_KEY` is set on Render. If tha
 - `getMatchupPropBoard`: return line-specific Stake selections for a matchup
 - `getBoardSummary`: return compact counts, market coverage, context coverage, and warning counts without raw prop dumps
 - `getPropPage`: return a filtered/paginated page of compact Stake rows
-- `getComparisonBoard`: return compact Stake rows with MLB helper metrics for comparison, not final picks
+- `getComparisonBoard`: return compact Stake rows with MLB helper metrics, multi-window evidence, decision profiles, and market heatmap data for comparison, not final picks
+- `buildSlipCandidates`: assemble target-odds candidate slip shapes from comparison rows; GPT still owns the final recommendation
 - `getPlayerMlbContext`: return MLB season and recent-window context for a player
 - `getSpecificPropContext`: enrich one Stake prop selection with MLB context for the exact requested side
 - `getPropContextBatch`: enrich up to 20 selected Stake props at once for finalist review
@@ -45,8 +47,11 @@ Authentication can stay `None` unless `AZP_GPT_API_KEY` is set on Render. If tha
 3. Use `getComparisonBoard` for compact MLB helper metrics on filtered candidates.
 4. Use `getPropContextBatch` or `getSpecificPropContext` for finalists.
 5. Make the decision inside the GPT.
-6. Call `validateSelections` with the exact `selectionId`, side, line, and odds. Use `validationMode: strict` unless you are only doing loose research.
-7. If validation passes, call `saveGptDecision`.
-8. Do not recommend props that fail validation.
+6. For target-odds or mega-parlay requests, call `buildSlipCandidates` before choosing finalists.
+7. Call `validateSelections` with the exact `selectionId`, side, line, and odds. Use `validationMode: strict` unless you are only doing loose research.
+8. If validation passes, call `saveGptDecision`.
+9. Do not recommend props that fail validation.
 
 Stake availability comes first. MLB context can support or reject a pick, but it cannot create a pick that Stake does not currently offer. Feed validation is not the same as a final Stake bet-slip quote; if a line or price differs in the UI, the UI/quote wins.
+
+The GPT should treat no-pick or fewer-pick outcomes as valid. If clean candidates cannot reach a requested target odds range, it should say that instead of forcing weak filler legs.

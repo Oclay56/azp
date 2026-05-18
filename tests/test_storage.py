@@ -24,6 +24,10 @@ def test_store_saves_gpt_decision_legs(tmp_path):
                     "odds": 2.9,
                     "playable": True,
                     "availability": {"status": "active"},
+                    "decisionProfile": {
+                        "finalStatus": "playable",
+                        "riskFlags": ["recent_and_season_agree"],
+                    },
                 }
             ],
         },
@@ -35,6 +39,9 @@ def test_store_saves_gpt_decision_legs(tmp_path):
     assert rows[0]["decisionId"] == result["decisionId"]
     assert rows[0]["player"] == "George Springer"
     assert rows[0]["playable"] is True
+    assert rows[0]["decisionProfile"]["finalStatus"] == "playable"
+    assert rows[0]["riskFlags"] == ["recent_and_season_agree"]
+    assert rows[0]["settlement"]["status"] == "unsettled"
 
 
 def test_store_saves_market_mappings(tmp_path):

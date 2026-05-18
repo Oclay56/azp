@@ -34,8 +34,8 @@ class GptActionStore:
                 """
                 INSERT INTO gpt_decision_requests (
                     decision_id, captured_at, source, matchup, slate_date,
-                    prompt, request_json, response_json, validation_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    prompt, request_json, response_json, validation_json, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     decision_id,
@@ -47,6 +47,7 @@ class GptActionStore:
                     _json_dumps(request_body),
                     _json_dumps(response),
                     _json_dumps(validation),
+                    _json_dumps(_decision_metadata(response, request_body)),
                 ),
             )
             for rank, selection in enumerate(selections, start=1):
@@ -56,8 +57,10 @@ class GptActionStore:
                         leg_id, decision_id, rank, captured_at, slate_date, matchup,
                         selection_id, prop_id, fixture_slug, player_name, team_name,
                         market_key, market_name, side, line, odds, playable, status,
-                        selection_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        selection_json, decision_profile_json, risk_flags_json,
+                        settlement_status, actual_stat, settled_at,
+                        settlement_confidence, settlement_source
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     _decision_leg_values(
                         decision_id=decision_id,
@@ -138,7 +141,8 @@ class GptActionStore:
                     prompt TEXT,
                     request_json TEXT NOT NULL,
                     response_json TEXT NOT NULL,
-                    validation_json TEXT NOT NULL
+                    validation_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
                 );
 
                 CREATE TABLE IF NOT EXISTS gpt_decision_legs (
@@ -161,6 +165,13 @@ class GptActionStore:
                     playable INTEGER NOT NULL DEFAULT 0,
                     status TEXT,
                     selection_json TEXT NOT NULL,
+                    decision_profile_json TEXT NOT NULL DEFAULT '{}',
+                    risk_flags_json TEXT NOT NULL DEFAULT '[]',
+                    settlement_status TEXT NOT NULL DEFAULT 'unsettled',
+                    actual_stat REAL,
+                    settled_at TEXT,
+                    settlement_confidence REAL,
+                    settlement_source TEXT,
                     FOREIGN KEY(decision_id) REFERENCES gpt_decision_requests(decision_id)
                 );
 
@@ -177,6 +188,14 @@ class GptActionStore:
                 );
                 """
             )
+            _ensure_column(conn, "gpt_decision_requests", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+            _ensure_column(conn, "gpt_decision_legs", "decision_profile_json", "TEXT NOT NULL DEFAULT '{}'")
+            _ensure_column(conn, "gpt_decision_legs", "risk_flags_json", "TEXT NOT NULL DEFAULT '[]'")
+            _ensure_column(conn, "gpt_decision_legs", "settlement_status", "TEXT NOT NULL DEFAULT 'unsettled'")
+            _ensure_column(conn, "gpt_decision_legs", "actual_stat", "REAL")
+            _ensure_column(conn, "gpt_decision_legs", "settled_at", "TEXT")
+            _ensure_column(conn, "gpt_decision_legs", "settlement_confidence", "REAL")
+            _ensure_column(conn, "gpt_decision_legs", "settlement_source", "TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
@@ -223,6 +242,13 @@ def _decision_leg_values(
         1 if selection.get("playable") else 0,
         availability.get("status") or selection.get("status"),
         _json_dumps(selection),
+        _json_dumps(selection.get("decisionProfile") or {}),
+        _json_dumps(selection.get("riskFlags") or (selection.get("decisionProfile") or {}).get("riskFlags") or []),
+        "unsettled",
+        None,
+        None,
+        None,
+        None,
     )
 
 
@@ -247,6 +273,32 @@ def _leg_row(row: sqlite3.Row) -> dict[str, Any]:
         "playable": bool(row["playable"]),
         "status": row["status"],
         "selection": _json_loads(row["selection_json"]),
+        "decisionProfile": _json_loads(row["decision_profile_json"]),
+        "riskFlags": _json_loads(row["risk_flags_json"]),
+        "settlement": {
+            "status": row["settlement_status"],
+            "actualStat": row["actual_stat"],
+            "settledAt": row["settled_at"],
+            "confidence": row["settlement_confidence"],
+            "source": row["settlement_source"],
+        },
+    }
+
+
+def _decision_metadata(
+    response: dict[str, Any],
+    request_body: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "mode": request_body.get("mode"),
+        "targetOddsMin": request_body.get("targetOddsMin") or request_body.get("target_odds_min"),
+        "targetOddsMax": request_body.get("targetOddsMax") or request_body.get("target_odds_max"),
+        "minLegs": request_body.get("minLegs") or request_body.get("min_legs"),
+        "maxLegs": request_body.get("maxLegs") or request_body.get("max_legs"),
+        "validationMode": (response.get("validation") or {}).get("validationMode"),
+        "oddsPolicy": (response.get("validation") or {}).get("oddsPolicy"),
+        "selectionCount": response.get("selectionCount"),
+        "source": response.get("source"),
     }
 
 
@@ -271,3 +323,17 @@ def _float_or_none(value: Any) -> float | None:
 
 def _clean_limit(limit: int) -> int:
     return max(1, min(int(limit), 500))
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    definition: str,
+) -> None:
+    columns = {
+        row["name"]
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in columns:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
