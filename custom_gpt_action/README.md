@@ -69,7 +69,7 @@ Authentication can stay `None` unless `AZP_GPT_API_KEY` is set on Render. If tha
 6. For target-odds or mega-parlay requests, call `buildSlipCandidates` before choosing finalists.
 7. Call `validateSelections` with the exact `selectionId`, side, line, and odds. Use `validationMode: strict` unless you are only doing loose research.
 8. If validation passes, call `saveGptDecision`.
-9. If the user requested local slip building, call `createSlipJob`.
+9. If the user requested local slip building, call `createSlipJob` with the `current` object from each valid `validateSelections` result. Do not send candidate summaries or odds-only rows.
 10. Do not recommend props that fail validation.
 
 Stake availability comes first. MLB context can support or reject a pick, but it cannot create a pick that Stake does not currently offer. Feed validation is not the same as a final Stake bet-slip quote; if a line or price differs in the UI, the UI/quote wins.
@@ -97,6 +97,7 @@ The bridge is intentionally guarded:
 - it watches Render/Supabase-backed slip-job endpoints
 - it claims pending jobs
 - it can audit or click exact visible Stake legs when configured
+- it rejects malformed jobs before the browser opens
 - it blocks ambiguous or missing UI matches instead of guessing
 - it reports the bridge result back to the backend
 - it does not enter wager amount

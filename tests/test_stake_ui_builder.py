@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.stake_ui_builder import (
     StakeUiBuildConfig,
+    build_stake_ui_slip,
     choose_unique_click_candidate,
     evaluate_candidate_text,
     selection_to_ui_leg,
@@ -143,3 +146,23 @@ def test_selection_to_ui_leg_rejects_invalid_side(side):
             },
             index=1,
         )
+
+
+def test_build_stake_ui_slip_blocks_malformed_jobs_before_browser():
+    result = asyncio.run(build_stake_ui_slip(
+        {
+            "selections": [
+                {
+                    "side": "under",
+                    "line": 4.5,
+                    "odds": 1.64,
+                }
+            ]
+        },
+        StakeUiBuildConfig(mode="click"),
+    ))
+
+    assert result["blocked"] == 1
+    assert result["clicked"] == 0
+    assert result["uiAutomationEnabled"] is False
+    assert "missing player.name" in result["message"]

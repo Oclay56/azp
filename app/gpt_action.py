@@ -2471,6 +2471,10 @@ def _selection_request_body(include_prompt: bool = False) -> dict[str, Any]:
 def _slip_job_request_body() -> dict[str, Any]:
     return {
         "required": True,
+        "description": (
+            "Create only from exact validated Stake selection rows. After validateSelections, "
+            "pass each valid result.current object as an item in selections."
+        ),
         "content": {
             "application/json": {
                 "schema": {
@@ -2490,14 +2494,35 @@ def _slip_job_request_body() -> dict[str, Any]:
                                 "properties": {
                                     "selectionId": {"type": "string"},
                                     "propId": {"type": "string"},
-                                    "player": {"type": "object", "additionalProperties": True},
+                                    "fixtureSlug": {"type": "string"},
+                                    "player": {
+                                        "type": "object",
+                                        "properties": {"name": {"type": "string"}},
+                                        "required": ["name"],
+                                        "additionalProperties": True,
+                                    },
                                     "team": {"type": "object", "additionalProperties": True},
-                                    "market": {"type": "object", "additionalProperties": True},
+                                    "market": {
+                                        "type": "object",
+                                        "properties": {
+                                            "key": {"type": "string"},
+                                            "name": {"type": "string"},
+                                        },
+                                        "additionalProperties": True,
+                                    },
                                     "side": {"type": "string", "enum": ["over", "under"]},
                                     "line": {"type": "number"},
                                     "odds": {"type": "number"},
                                 },
-                                "required": ["side", "line", "odds"],
+                                "required": [
+                                    "selectionId",
+                                    "fixtureSlug",
+                                    "player",
+                                    "market",
+                                    "side",
+                                    "line",
+                                    "odds",
+                                ],
                                 "additionalProperties": True,
                             },
                         },

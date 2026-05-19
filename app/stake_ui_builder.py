@@ -214,8 +214,26 @@ async def build_stake_ui_slip(
     job: dict[str, Any],
     config: StakeUiBuildConfig,
 ) -> dict[str, Any]:
-    legs = _job_legs(job)
     mode = _clean_mode(config.mode)
+    try:
+        legs = _job_legs(job)
+    except ValueError as exc:
+        return {
+            "mode": mode,
+            "uiAutomationEnabled": False,
+            "matched": 0,
+            "clicked": 0,
+            "blocked": len(job.get("selections") or []),
+            "requiresManualReview": True,
+            "message": str(exc),
+            "safety": {
+                "enteredWagerAmount": False,
+                "submittedBet": False,
+                "exactLineRequired": True,
+                "malformedJobsBlocked": True,
+            },
+            "legs": [],
+        }
     if mode == "dry_run":
         return _dry_run_result(legs)
 

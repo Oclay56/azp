@@ -72,9 +72,7 @@ async def build_mlb_schedule_stake_map(
 
 
 def normalize_slip_job_request(payload: dict[str, Any]) -> dict[str, Any]:
-    selections = payload.get("selections")
-    if not isinstance(selections, list) or not selections:
-        raise ValueError("Slip job requires at least one selection.")
+    selections = _normalize_slip_job_selections(payload.get("selections"))
 
     matchup = _text(payload.get("matchup"))
     slate_date = _text(payload.get("date") or payload.get("slateDate"))
@@ -89,6 +87,69 @@ def normalize_slip_job_request(payload: dict[str, Any]) -> dict[str, Any]:
         "selections": selections,
         "request": payload,
     }
+
+
+def _normalize_slip_job_selections(raw_selections: Any) -> list[dict[str, Any]]:
+    if not isinstance(raw_selections, list) or not raw_selections:
+        raise ValueError("Slip job requires at least one selection.")
+    return [
+        _normalize_slip_job_selection(raw_selection, index)
+        for index, raw_selection in enumerate(raw_selections, start=1)
+    ]
+
+
+def _normalize_slip_job_selection(raw_selection: Any, index: int) -> dict[str, Any]:
+    if not isinstance(raw_selection, dict):
+        raise ValueError(f"Slip job selection {index} must be an object.")
+
+    if raw_selection.get("valid") is False:
+        status = _text(raw_selection.get("status")) or "invalid"
+        raise ValueError(
+            f"Slip job selection {index} failed validation ({status}). "
+            "Do not create a slip job from invalid selections."
+        )
+
+    selection = raw_selection.get("current") if isinstance(raw_selection.get("current"), dict) else raw_selection
+    player = selection.get("player") if isinstance(selection.get("player"), dict) else {}
+    market = selection.get("market") if isinstance(selection.get("market"), dict) else {}
+    player_name = _text(player.get("name"))
+    market_name = _text(market.get("name") or market.get("key"))
+    side = (_text(selection.get("side")) or "").lower()
+    line = _float_or_none(selection.get("line"))
+    odds = _float_or_none(selection.get("odds"))
+    selection_id = _text(selection.get("selectionId"))
+    fixture_slug = _text(selection.get("fixtureSlug"))
+
+    missing = []
+    if not selection_id:
+        missing.append("selectionId")
+    if not fixture_slug:
+        missing.append("fixtureSlug")
+    if not player_name or player_name.lower().startswith("unknown"):
+        missing.append("player.name")
+    if not market_name or market_name.lower() == "market":
+        missing.append("market.name/key")
+    if side not in {"over", "under"}:
+        missing.append("side")
+    if line is None:
+        missing.append("line")
+    if odds is None:
+        missing.append("odds")
+
+    if missing:
+        missing_text = ", ".join(missing)
+        raise ValueError(
+            f"Slip job selection {index} is missing exact validated fields: {missing_text}. "
+            "Call validateSelections first and pass each valid result.current row to createSlipJob."
+        )
+
+    normalized = dict(selection)
+    normalized["player"] = dict(player)
+    normalized["market"] = dict(market)
+    normalized["side"] = side
+    normalized["line"] = line
+    normalized["odds"] = odds
+    return normalized
 
 
 def _schedule_game_row(game: dict[str, Any]) -> dict[str, Any]:
@@ -139,3 +200,10 @@ def _text(value: Any) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

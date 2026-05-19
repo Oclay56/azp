@@ -123,6 +123,8 @@ def test_slip_job_lifecycle_routes_create_claim_and_update(tmp_path):
                     "selections": [
                         {
                             "selectionId": "sel-1",
+                            "propId": "prop-1",
+                            "fixtureSlug": "blue-jays-angels",
                             "player": {"name": "George Springer"},
                             "market": {"key": "hits", "name": "Hits"},
                             "side": "under",
@@ -157,3 +159,65 @@ def test_slip_job_lifecycle_routes_create_claim_and_update(tmp_path):
     assert next_response.json()["job"]["status"] == "claimed"
     assert status_response.status_code == 200
     assert status_response.json()["status"] == "dry_run_ready"
+
+
+def test_slip_job_route_rejects_summary_legs_without_player_identity(tmp_path):
+    store = GptActionStore(tmp_path / "gpt.sqlite")
+    app.dependency_overrides[get_gpt_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/slip-jobs",
+                json={
+                    "matchup": "Blue Jays vs Angels",
+                    "selections": [
+                        {
+                            "side": "under",
+                            "line": 4.5,
+                            "odds": 1.64,
+                        }
+                    ],
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert "player.name" in response.json()["detail"]
+    assert "validateSelections" in response.json()["detail"]
+
+
+def test_slip_job_route_accepts_validate_result_current_rows(tmp_path):
+    store = GptActionStore(tmp_path / "gpt.sqlite")
+    app.dependency_overrides[get_gpt_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            response = client.post(
+                "/slip-jobs",
+                json={
+                    "matchup": "Blue Jays vs Angels",
+                    "selections": [
+                        {
+                            "valid": True,
+                            "current": {
+                                "selectionId": "sel-1",
+                                "propId": "prop-1",
+                                "fixtureSlug": "blue-jays-angels",
+                                "player": {"name": "George Springer"},
+                                "market": {"key": "hits", "name": "Hits"},
+                                "side": "UNDER",
+                                "line": "0.5",
+                                "odds": "2.9",
+                            },
+                        }
+                    ],
+                },
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    selection = response.json()["selections"][0]
+    assert selection["player"]["name"] == "George Springer"
+    assert selection["side"] == "under"
+    assert selection["line"] == 0.5

@@ -288,6 +288,27 @@ def test_save_gpt_decision_schema_preserves_prompt_fields():
     assert "riskFlags" in body_schema["properties"]
 
 
+def test_create_slip_job_schema_requires_exact_validated_rows():
+    schema = build_gpt_action_openapi_schema("https://azp-test.example")
+    operation = schema["paths"]["/slip-jobs"]["post"]
+    selection_schema = (
+        operation["requestBody"]["content"]["application/json"]["schema"]["properties"][
+            "selections"
+        ]["items"]
+    )
+
+    assert selection_schema["required"] == [
+        "selectionId",
+        "fixtureSlug",
+        "player",
+        "market",
+        "side",
+        "line",
+        "odds",
+    ]
+    assert selection_schema["properties"]["player"]["required"] == ["name"]
+
+
 def test_gpt_api_key_is_optional_until_env_var_is_set(monkeypatch):
     monkeypatch.delenv("AZP_GPT_API_KEY", raising=False)
     assert require_gpt_api_key_value(None) is None
