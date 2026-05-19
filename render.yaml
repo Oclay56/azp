@@ -24,3 +24,5 @@ services:
         value: "1.10"
       - key: AZP_FAIL_ON_SUPABASE_LEDGER_ERROR
         value: "0"
+      - key: AZP_LOCAL_UI_JOB_TABLE
+        value: local_ui_jobs

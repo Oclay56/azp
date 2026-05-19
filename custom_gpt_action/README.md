@@ -9,6 +9,7 @@ The Custom GPT makes the final decision. The Render backend only:
 - normalizes players, teams, markets, lines, sides, and odds
 - pulls MLB Stats API context for players and props
 - validates GPT-selected props against the current Stake board
+- creates local-helper jobs for UI-verified Stake Same Game Multi boards
 - returns decision profiles, market heatmaps, and constrained slip candidates for GPT review
 - saves GPT-authored decisions and market mappings when storage is configured
 
@@ -35,6 +36,7 @@ Authentication can stay `None` unless `AZP_GPT_API_KEY` is set on Render. If tha
 - `getPropPage`: return a filtered/paginated page of compact Stake rows
 - `getComparisonBoard`: return compact Stake rows with MLB helper metrics, multi-window evidence, decision profiles, and market heatmap data for comparison, not final picks
 - `buildSlipCandidates`: assemble target-odds candidate slip shapes from comparison rows; GPT still owns the final recommendation
+- `getStakeUiSgmBoard`: request the local helper to read the exact Stake Same Game Multi board through the user's Chrome/VPN session
 - `getPlayerMlbContext`: return MLB season and recent-window context for a player
 - `getSpecificPropContext`: enrich one Stake prop selection with MLB context for the exact requested side
 - `getPropContextBatch`: enrich up to 20 selected Stake props at once for finalist review
@@ -46,15 +48,16 @@ Authentication can stay `None` unless `AZP_GPT_API_KEY` is set on Render. If tha
 ## Required GPT Flow
 
 1. Use `getMlbSchedule` or `mapMlbScheduleToStake` when the user asks what games are available.
-2. Call `getBoardSummary` first for broad matchup requests.
-3. Use `getPropPage` to page through specific markets/sides instead of requesting the full raw board.
-4. Use `getComparisonBoard` for compact MLB helper metrics on filtered candidates.
-5. Use `getPropContextBatch` or `getSpecificPropContext` for finalists.
-6. Make the decision inside the GPT.
-7. For target-odds or mega-parlay requests, call `buildSlipCandidates` before choosing finalists.
-8. Call `validateSelections` with the exact `selectionId`, side, line, and odds. Use `validationMode: strict` unless you are only doing loose research.
-9. If validation passes, call `saveGptDecision`.
-10. Do not recommend props that fail validation.
+2. For Same Game Multi requests, call `getStakeUiSgmBoard` before selecting finalists. If it is unavailable, do not pretend feed-only lines are final.
+3. Call `getBoardSummary` first for broad non-SGM matchup requests.
+4. Use `getPropPage` to page through specific markets/sides instead of requesting the full raw board.
+5. Use `getComparisonBoard` for compact MLB helper metrics on filtered candidates.
+6. Use `getPropContextBatch` or `getSpecificPropContext` for finalists.
+7. Make the decision inside the GPT.
+8. For target-odds or mega-parlay requests, call `buildSlipCandidates` before choosing finalists.
+9. Call `validateSelections` with the exact `selectionId`, side, line, and odds. Use `validationMode: strict` unless you are only doing loose research.
+10. If validation passes, call `saveGptDecision`.
+11. Do not recommend props that fail validation.
 
 Stake availability comes first. MLB context can support or reject a pick, but it cannot create a pick that Stake does not currently offer. Feed validation is not the same as a final Stake bet-slip quote; if a line or price differs in the UI, the UI/quote wins.
 

@@ -171,6 +171,18 @@ def build_gpt_action_openapi_schema(server_url: str) -> dict[str, Any]:
                     request_body=_slip_candidate_request_body(),
                 )
             },
+            "/mlb/stake-ui/sgm-board": {
+                "post": _operation(
+                    "getStakeUiSgmBoard",
+                    "Get Stake UI Same Game Multi board",
+                    (
+                        "Creates a local-helper job that reads the exact Stake UI "
+                        "Same Game Multi board through the user's Chrome/VPN session. "
+                        "Use this as the source of truth before final SGM picks."
+                    ),
+                    request_body=_stake_ui_sgm_request_body(),
+                )
+            },
             "/mlb/matchup/{matchup}/probable-pitchers": {
                 "get": _operation(
                     "getProbablePitchers",
@@ -2391,6 +2403,34 @@ def _slip_candidate_request_body() -> dict[str, Any]:
                         "qualityFloor": {"type": "number", "minimum": 0, "maximum": 100},
                         "allowNoPick": {"type": "boolean"},
                         "historyLimit": {"type": "integer", "minimum": 1, "maximum": 15},
+                    },
+                    "required": ["matchup"],
+                    "additionalProperties": True,
+                }
+            }
+        },
+    }
+
+
+def _stake_ui_sgm_request_body() -> dict[str, Any]:
+    return {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "matchup": {
+                            "type": "string",
+                            "description": "Matchup text, for example Braves vs Marlins.",
+                        },
+                        "fixtureSlug": {
+                            "type": "string",
+                            "description": "Stake fixture slug. Preferred when known.",
+                        },
+                        "date": {"type": "string", "format": "date"},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+                        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 45},
                     },
                     "required": ["matchup"],
                     "additionalProperties": True,

@@ -111,4 +111,46 @@ create index if not exists gpt_decision_legs_market_idx
 create index if not exists market_mappings_active_idx
     on public.market_mappings (sport, active);
 
+create table if not exists public.local_ui_jobs (
+    job_id text primary key,
+    job_type text not null,
+    status text not null default 'pending',
+    request_json jsonb not null,
+    result_json jsonb,
+    error_message text,
+    worker_id text,
+    created_at timestamptz not null default now(),
+    claimed_at timestamptz,
+    completed_at timestamptz,
+    updated_at timestamptz not null default now(),
+    expires_at timestamptz
+);
+
+alter table public.local_ui_jobs
+    add column if not exists result_json jsonb;
+
+alter table public.local_ui_jobs
+    add column if not exists error_message text;
+
+alter table public.local_ui_jobs
+    add column if not exists worker_id text;
+
+alter table public.local_ui_jobs
+    add column if not exists claimed_at timestamptz;
+
+alter table public.local_ui_jobs
+    add column if not exists completed_at timestamptz;
+
+alter table public.local_ui_jobs
+    add column if not exists updated_at timestamptz not null default now();
+
+alter table public.local_ui_jobs
+    add column if not exists expires_at timestamptz;
+
+create index if not exists local_ui_jobs_pending_idx
+    on public.local_ui_jobs (job_type, status, created_at);
+
+create index if not exists local_ui_jobs_expires_idx
+    on public.local_ui_jobs (expires_at);
+
 notify pgrst, 'reload schema';

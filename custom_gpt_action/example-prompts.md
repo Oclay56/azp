@@ -9,6 +9,10 @@ Build a two-leg same-game parlay from Stake-available props only. Pull MLB conte
 ```
 
 ```text
+Build a two-leg Same Game Multi for Braves vs Marlins, unders only. Use the Stake UI SGM board first, then MLB context, then give me only UI-backed picks.
+```
+
+```text
 What markets does Stake currently offer for Yankees vs Red Sox?
 ```
 

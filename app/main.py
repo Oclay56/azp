@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import AsyncIterator
 from datetime import date
 from typing import Any
@@ -11,6 +12,13 @@ from .local_archive import (
     archive_gpt_decision,
     archive_market_mappings,
     archive_status,
+)
+from .local_ui_bridge import (
+    STAKE_SGM_JOB_TYPE,
+    LocalUiBridgeDisabled,
+    LocalUiBridgeError,
+    LocalUiBridgeTimeout,
+    SupabaseLocalUiJobStore,
 )
 from .gpt_action import (
     build_available_markets,
@@ -34,6 +42,7 @@ from .gpt_action import (
 )
 from .mlb_data import MLBAPIError, MLBDataEngine, MLBStatsClient, build_mlb_http_client
 from .mlb_schedule import build_mlb_schedule_stake_map, build_mlb_schedule_view
+from .mlb_props import slug_key
 from .slate import DEFAULT_TIMEZONE
 from .stake_client import StakeAPIError, StakeClient, build_http_client
 from .storage import GptActionStore
@@ -67,6 +76,10 @@ async def get_mlb_engine() -> AsyncIterator[MLBDataEngine]:
 
 def get_gpt_store() -> GptActionStore:
     return GptActionStore()
+
+
+def get_local_ui_job_store() -> SupabaseLocalUiJobStore:
+    return SupabaseLocalUiJobStore()
 
 
 @app.get("/", include_in_schema=False)
@@ -330,6 +343,111 @@ async def mlb_build_slip_candidates(
         payload.get("qualityFloor") or payload.get("quality_floor") or 55.0,
         _bool_from_body(payload, "allowNoPick", "allow_no_pick", True),
     )
+
+
+@app.post("/mlb/stake-ui/sgm-board")
+async def mlb_stake_ui_sgm_board(
+    payload: dict[str, Any] = Body(...),
+    _: None = Depends(require_gpt_api_key),
+    client: StakeClient = Depends(get_stake_client),
+    job_store: SupabaseLocalUiJobStore = Depends(get_local_ui_job_store),
+) -> Any:
+    if not job_store.enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "source": "local_ui_bridge",
+                "message": (
+                    "Supabase local UI bridge is not configured. Set SUPABASE_URL "
+                    "and SUPABASE_SERVICE_ROLE_KEY on Render and the local helper."
+                ),
+            },
+        )
+
+    matchup = _required_body_text(payload, "matchup")
+    slate_date = _date_from_body(payload)
+    limit = _clean_int_from_body(payload, "limit", 25, minimum=1, maximum=100)
+    timeout_seconds = _clean_int_from_body(
+        payload,
+        "timeoutSeconds",
+        25,
+        minimum=1,
+        maximum=45,
+    )
+    fixture_slug = str(payload.get("fixtureSlug") or "").strip()
+    if not fixture_slug:
+        fixture_slug = await _resolve_stake_fixture_slug(
+            client=client,
+            matchup=matchup,
+            slate_date=slate_date,
+            limit=limit,
+        )
+
+    request = {
+        "matchup": matchup,
+        "fixtureSlug": fixture_slug,
+        "date": slate_date.isoformat() if slate_date else None,
+        "requestedBy": "custom_gpt",
+        "purpose": "stake_ui_sgm_truth_board",
+    }
+    try:
+        job = await job_store.create_job(
+            job_type=STAKE_SGM_JOB_TYPE,
+            request=request,
+            timeout_seconds=timeout_seconds,
+        )
+        completed = await job_store.wait_for_completed_result(
+            job["jobId"],
+            timeout_seconds=timeout_seconds,
+        )
+    except LocalUiBridgeDisabled as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+    except LocalUiBridgeTimeout as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "source": "local_ui_bridge",
+                "message": str(exc),
+                "fixtureSlug": fixture_slug,
+                "matchup": matchup,
+            },
+        ) from exc
+    except LocalUiBridgeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+
+    if completed.get("status") != "completed":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "source": "local_ui_bridge",
+                "message": completed.get("error") or "Local helper job did not complete.",
+                "status": completed.get("status"),
+                "jobId": completed.get("jobId"),
+            },
+        )
+
+    return {
+        "decisionOwner": "custom_gpt",
+        "source": "stake_ui_sgm_via_local_helper",
+        "purpose": "stake_ui_truth_board",
+        "matchup": matchup,
+        "date": slate_date.isoformat() if slate_date else None,
+        "fixtureSlug": fixture_slug,
+        "bridge": {
+            "jobId": completed.get("jobId"),
+            "status": completed.get("status"),
+            "workerId": completed.get("workerId"),
+            "createdAt": completed.get("createdAt"),
+            "completedAt": completed.get("completedAt"),
+        },
+        "uiBoard": completed.get("result") or {},
+    }
 
 
 @app.get("/mlb/matchup/{matchup}/probable-pitchers")
@@ -702,3 +820,79 @@ def _bool_from_body(
         status_code=422,
         detail=f"{camel_key} must be a boolean value",
     )
+
+
+def _clean_int_from_body(
+    payload: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw_value = payload.get(key, default)
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=f"{key} must be an integer") from exc
+    return max(minimum, min(value, maximum))
+
+
+async def _resolve_stake_fixture_slug(
+    *,
+    client: StakeClient,
+    matchup: str,
+    slate_date: date | None,
+    limit: int,
+) -> str:
+    schedule = await build_matchups(
+        client,
+        slate_date,
+        _timezone_name(),
+        limit,
+    )
+    matchup_key = _matchup_key(matchup)
+    for row in schedule.get("matchups") or []:
+        row_keys = {
+            _matchup_key(row.get("name") or ""),
+            _matchup_key(" ".join(row.get("teams") or [])),
+        }
+        row_key_joined = "|".join(sorted(slug_key(team) for team in row.get("teams") or []))
+        if matchup_key in row_keys or _same_team_set(matchup, row.get("teams") or []):
+            return str(row.get("fixtureSlug") or "")
+        if matchup_key and matchup_key == row_key_joined:
+            return str(row.get("fixtureSlug") or "")
+
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "source": "stake",
+            "message": "Could not resolve matchup to a Stake fixture slug.",
+            "matchup": matchup,
+            "date": schedule.get("date"),
+        },
+    )
+
+
+def _same_team_set(matchup: str, teams: list[Any]) -> bool:
+    requested_tokens = {
+        slug_key(part)
+        for part in re.split(r"\s+(?:vs|at|@|-)\s+", matchup, flags=re.IGNORECASE)
+        if slug_key(part)
+    }
+    team_tokens = {slug_key(team) for team in teams if slug_key(team)}
+    if not requested_tokens or not team_tokens:
+        return False
+    return all(
+        any(requested == team or requested in team or team in requested for team in team_tokens)
+        for requested in requested_tokens
+    )
+
+
+def _matchup_key(value: str) -> str:
+    parts = [
+        slug_key(part)
+        for part in re.split(r"\s+(?:vs|at|@|-)\s+", str(value), flags=re.IGNORECASE)
+        if slug_key(part)
+    ]
+    return "|".join(sorted(parts))
