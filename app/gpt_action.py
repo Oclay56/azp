@@ -65,7 +65,10 @@ def build_gpt_action_openapi_schema(server_url: str) -> dict[str, Any]:
                 "get": _operation(
                     "getMlbSchedule",
                     "Get official MLB schedule",
-                    "Returns official MLB games for a date from MLB Stats API. Use this for game discovery, not bet availability.",
+                    (
+                        "Returns official MLB games for a date from MLB Stats API. "
+                        "Use this for game discovery, not bet availability."
+                    ),
                     parameters=[_date_param()],
                 )
             },
@@ -73,7 +76,10 @@ def build_gpt_action_openapi_schema(server_url: str) -> dict[str, Any]:
                 "get": _operation(
                     "mapMlbScheduleToStake",
                     "Map official MLB schedule to Stake fixtures",
-                    "Returns official MLB games with matching Stake fixtures when Stake offers the matchup.",
+                    (
+                        "Returns official MLB games with matching Stake fixtures "
+                        "when Stake offers the matchup."
+                    ),
                     parameters=[_date_param(), _limit_param()],
                 )
             },
@@ -259,22 +265,6 @@ def build_gpt_action_openapi_schema(server_url: str) -> dict[str, Any]:
                     "Save a GPT-authored decision",
                     "Stores what the GPT chose after validation. This is not an AZP recommendation.",
                     request_body=_selection_request_body(include_prompt=True),
-                )
-            },
-            "/slip-jobs": {
-                "post": _operation(
-                    "createSlipJob",
-                    "Create a local bridge slip job",
-                    "Stores a reviewed GPT slip as a pending job for the local AZP bridge. The bridge may open Stake for review, but this action does not place bets.",
-                    request_body=_slip_job_request_body(),
-                )
-            },
-            "/slip-jobs/{jobId}": {
-                "get": _operation(
-                    "getSlipJobStatus",
-                    "Get local bridge slip job status",
-                    "Returns status and bridge result for a slip job.",
-                    parameters=[_job_id_path_param()],
                 )
             },
         },
@@ -2288,15 +2278,6 @@ def _history_limit_param() -> dict[str, Any]:
     }
 
 
-def _job_id_path_param() -> dict[str, Any]:
-    return {
-        "name": "jobId",
-        "in": "path",
-        "required": True,
-        "schema": {"type": "string"},
-    }
-
-
 def _page_param() -> dict[str, Any]:
     return {
         "name": "page",
@@ -2461,73 +2442,6 @@ def _selection_request_body(include_prompt: bool = False) -> dict[str, Any]:
                     "type": "object",
                     "properties": properties,
                     "required": required,
-                    "additionalProperties": True,
-                }
-            }
-        },
-    }
-
-
-def _slip_job_request_body() -> dict[str, Any]:
-    return {
-        "required": True,
-        "description": (
-            "Create only from exact validated Stake selection rows. After validateSelections, "
-            "pass each valid result.current object as an item in selections."
-        ),
-        "content": {
-            "application/json": {
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "source": {"type": "string"},
-                        "prompt": {"type": "string"},
-                        "slipType": {"type": "string"},
-                        "matchup": {"type": "string"},
-                        "date": {"type": "string", "format": "date"},
-                        "mode": {"type": "string"},
-                        "target": {"type": "object", "additionalProperties": True},
-                        "selections": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "selectionId": {"type": "string"},
-                                    "propId": {"type": "string"},
-                                    "fixtureSlug": {"type": "string"},
-                                    "player": {
-                                        "type": "object",
-                                        "properties": {"name": {"type": "string"}},
-                                        "required": ["name"],
-                                        "additionalProperties": True,
-                                    },
-                                    "team": {"type": "object", "additionalProperties": True},
-                                    "market": {
-                                        "type": "object",
-                                        "properties": {
-                                            "key": {"type": "string"},
-                                            "name": {"type": "string"},
-                                        },
-                                        "additionalProperties": True,
-                                    },
-                                    "side": {"type": "string", "enum": ["over", "under"]},
-                                    "line": {"type": "number"},
-                                    "odds": {"type": "number"},
-                                },
-                                "required": [
-                                    "selectionId",
-                                    "fixtureSlug",
-                                    "player",
-                                    "market",
-                                    "side",
-                                    "line",
-                                    "odds",
-                                ],
-                                "additionalProperties": True,
-                            },
-                        },
-                    },
-                    "required": ["selections"],
                     "additionalProperties": True,
                 }
             }

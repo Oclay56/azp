@@ -1,6 +1,5 @@
 fastapi
 httpx
-playwright
 pytest
 tzdata
 uvicorn[standard]
