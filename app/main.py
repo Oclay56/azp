@@ -1081,6 +1081,7 @@ def _compact_review_slip_result(result: dict[str, Any]) -> dict[str, Any]:
         "selectedRows": result.get("selectedRows") or [],
         "missingSelections": result.get("missingSelections") or [],
         "clickResults": result.get("clickResults") or [],
+        "addBetResult": result.get("addBetResult") or {},
         "warnings": result.get("warnings") or [],
         "safety": {
             "enteredStakeAmount": False,
