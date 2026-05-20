@@ -23,6 +23,7 @@ async def run_helper(
     worker_id: str | None = None,
     autostart_chrome: bool = True,
 ) -> None:
+    _load_dotenv()
     store = SupabaseLocalUiJobStore()
     if not store.enabled():
         raise RuntimeError(
@@ -136,7 +137,25 @@ def _chrome_path() -> Path | None:
     return None
 
 
+def _load_dotenv(path: Path | None = None) -> None:
+    env_path = path or Path.cwd() / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def main() -> int:
+    _load_dotenv()
     parser = argparse.ArgumentParser(description="Run the AZP local Stake UI helper.")
     parser.add_argument("--cdp-url", default=DEFAULT_CDP_URL)
     parser.add_argument("--poll-seconds", type=float, default=2.0)
