@@ -4,7 +4,9 @@ import pytest
 
 from app.stake_sgm_browser import (
     _check_page_ready,
+    _fixture_matchup_from_slug,
     _find_or_open_fixture_page,
+    _normalize_mlb_game_link,
     _has_logged_out_warning,
     fixture_url,
 )
@@ -110,3 +112,30 @@ def test_has_logged_out_warning_detects_account_action_blocker():
         ["browser appears logged out; read-only SGM data may still load"]
     )
     assert not _has_logged_out_warning(["page did not reach networkidle before continuing"])
+
+
+def test_normalize_mlb_game_link_accepts_localized_stake_urls():
+    link = _normalize_mlb_game_link(
+        "https://stake.com/de/sports/baseball/usa/mlb/46575562-washington-nationals-new-york-mets"
+    )
+
+    assert link == {
+        "fixtureSlug": "46575562-washington-nationals-new-york-mets",
+        "url": "https://stake.com/de/sports/baseball/usa/mlb/46575562-washington-nationals-new-york-mets",
+        "matchup": "Washington Nationals vs New York Mets",
+        "teams": ["Washington Nationals", "New York Mets"],
+    }
+
+
+def test_normalize_mlb_game_link_rejects_non_fixture_links():
+    assert _normalize_mlb_game_link("https://stake.com/sports/baseball/usa/mlb") is None
+    assert _normalize_mlb_game_link("https://stake.com/sports/football/usa/nfl/123-test") is None
+
+
+def test_fixture_matchup_from_slug_handles_multi_word_team_names():
+    assert _fixture_matchup_from_slug(
+        "46575351-new-york-yankees-toronto-blue-jays"
+    ) == {
+        "matchup": "New York Yankees vs Toronto Blue Jays",
+        "teams": ["New York Yankees", "Toronto Blue Jays"],
+    }

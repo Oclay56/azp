@@ -37,6 +37,8 @@ Authentication can stay `None` unless `AZP_GPT_API_KEY` is set on Render. If tha
 - `getComparisonBoard`: return compact Stake rows with MLB helper metrics, multi-window evidence, decision profiles, and market heatmap data for comparison, not final picks
 - `buildSlipCandidates`: assemble target-odds candidate slip shapes from comparison rows; GPT still owns the final recommendation
 - `getStakeUiSgmBoard`: request the local helper to read the exact Stake Same Game Multi board through the user's Chrome/VPN session
+- `getStakeUiMlbGames`: request the local helper to read visible MLB fixture links from the actual Stake UI
+- `buildStakeUiReviewSlipBatch`: build multiple exact UI-backed SGM groups into one visible Stake review slip using one shared browser page
 - `getPlayerMlbContext`: return MLB season and recent-window context for a player
 - `getSpecificPropContext`: enrich one Stake prop selection with MLB context for the exact requested side
 - `getPropContextBatch`: enrich up to 20 selected Stake props at once for finalist review
@@ -47,7 +49,7 @@ Authentication can stay `None` unless `AZP_GPT_API_KEY` is set on Render. If tha
 
 ## Required GPT Flow
 
-1. Use `getMlbSchedule` or `mapMlbScheduleToStake` when the user asks what games are available.
+1. Use `getMlbSchedule`, `mapMlbScheduleToStake`, or `getStakeUiMlbGames` when the user asks what games are available. Prefer `getStakeUiMlbGames` for multi-game Same Game Multi work.
 2. For Same Game Multi requests, call `getStakeUiSgmBoard` before selecting finalists. If it is unavailable, do not pretend feed-only lines are final.
 3. Call `getBoardSummary` first for broad non-SGM matchup requests.
 4. Use `getPropPage` to page through specific markets/sides instead of requesting the full raw board.
@@ -57,7 +59,8 @@ Authentication can stay `None` unless `AZP_GPT_API_KEY` is set on Render. If tha
 8. For target-odds or mega-parlay requests, call `buildSlipCandidates` before choosing finalists.
 9. Call `validateSelections` with the exact `selectionId`, side, line, and odds. Use `validationMode: strict` unless you are only doing loose research.
 10. If validation passes, call `saveGptDecision`.
-11. Do not recommend props that fail validation.
+11. For multi-game Same Game Multi review slips, use `buildStakeUiReviewSlipBatch` once instead of separate one-game slip builds.
+12. Do not recommend props that fail validation.
 
 Stake availability comes first. MLB context can support or reject a pick, but it cannot create a pick that Stake does not currently offer. Feed validation is not the same as a final Stake bet-slip quote; if a line or price differs in the UI, the UI/quote wins.
 

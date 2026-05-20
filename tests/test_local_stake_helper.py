@@ -60,6 +60,91 @@ def test_process_job_runs_sync_browser_reader_outside_event_loop(monkeypatch):
     assert store.completed[0][1]["request"] == job["request"]
 
 
+def test_process_job_runs_mlb_game_reader(monkeypatch):
+    def fake_read_stake_mlb_games(*, cdp_url: str, limit: int):
+        assert cdp_url == "http://127.0.0.1:9222"
+        assert limit == 12
+        return {
+            "source": "stake_ui_mlb_games",
+            "games": [
+                {
+                    "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                    "matchup": "New York Yankees vs Toronto Blue Jays",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        local_stake_helper,
+        "read_stake_mlb_games",
+        fake_read_stake_mlb_games,
+    )
+    store = FakeJobStore()
+    job = {
+        "jobId": "job-games",
+        "jobType": "stake_ui_mlb_games",
+        "request": {"limit": 12},
+    }
+
+    asyncio.run(
+        local_stake_helper.process_job(
+            store,
+            job,
+            cdp_url="http://127.0.0.1:9222",
+        )
+    )
+
+    assert not store.failed
+    assert store.completed[0][0] == "job-games"
+    assert store.completed[0][1]["games"][0]["fixtureSlug"] == "46575351-new-york-yankees-toronto-blue-jays"
+
+
+def test_process_job_runs_batch_review_builder(monkeypatch):
+    def fake_build_stake_sgm_review_slip_batch(groups: list[dict], *, cdp_url: str):
+        assert cdp_url == "http://127.0.0.1:9222"
+        assert groups[0]["fixtureSlug"] == "46575351-new-york-yankees-toronto-blue-jays"
+        return {
+            "source": "stake_ui_sgm_review_slip_batch",
+            "status": "built_for_review",
+            "clickedGroups": 1,
+            "clickedLegs": 2,
+        }
+
+    monkeypatch.setattr(
+        local_stake_helper,
+        "build_stake_sgm_review_slip_batch",
+        fake_build_stake_sgm_review_slip_batch,
+    )
+    store = FakeJobStore()
+    job = {
+        "jobId": "job-batch",
+        "jobType": "stake_ui_sgm_build_slip_batch",
+        "request": {
+            "groups": [
+                {
+                    "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                    "selections": [
+                        {"market": "Play Home Runs", "side": "under", "line": 2.5, "odds": 1.72},
+                        {"market": "Match Total Bases", "side": "under", "line": 25.5, "odds": 2.47},
+                    ],
+                }
+            ]
+        },
+    }
+
+    asyncio.run(
+        local_stake_helper.process_job(
+            store,
+            job,
+            cdp_url="http://127.0.0.1:9222",
+        )
+    )
+
+    assert not store.failed
+    assert store.completed[0][0] == "job-batch"
+    assert store.completed[0][1]["status"] == "built_for_review"
+
+
 def test_process_job_does_not_crash_when_failure_reporting_fails(monkeypatch, capsys):
     def fake_read_stake_sgm_board(fixture_slug: str, *, cdp_url: str):
         raise RuntimeError("Stake is still region-blocked in this browser session.")

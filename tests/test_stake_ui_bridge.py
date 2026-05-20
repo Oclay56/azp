@@ -156,6 +156,85 @@ class FakeCompletedBuildJobStore(FakeCompletedUiJobStore):
         }
 
 
+class FakeCompletedMlbGamesJobStore(FakeCompletedUiJobStore):
+    async def wait_for_completed_result(
+        self,
+        job_id: str,
+        *,
+        timeout_seconds: int,
+        poll_interval_seconds: float = 1.0,
+    ):
+        assert job_id == "job-123"
+        return {
+            "jobId": job_id,
+            "status": "completed",
+            "workerId": "azp-local-test",
+            "result": {
+                "source": "stake_ui_mlb_games",
+                "capturedAt": "2026-05-20T20:00:00Z",
+                "games": [
+                    {
+                        "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                        "url": "https://stake.com/de/sports/baseball/usa/mlb/46575351-new-york-yankees-toronto-blue-jays",
+                        "matchup": "New York Yankees vs Toronto Blue Jays",
+                        "teams": ["New York Yankees", "Toronto Blue Jays"],
+                        "statusText": "NOT STARTED",
+                    },
+                    {
+                        "fixtureSlug": "46575562-washington-nationals-new-york-mets",
+                        "url": "https://stake.com/de/sports/baseball/usa/mlb/46575562-washington-nationals-new-york-mets",
+                        "matchup": "Washington Nationals vs New York Mets",
+                        "teams": ["Washington Nationals", "New York Mets"],
+                        "statusText": "NOT STARTED",
+                    },
+                ],
+                "warnings": [],
+            },
+            "error": None,
+        }
+
+
+class FakeCompletedBatchBuildJobStore(FakeCompletedUiJobStore):
+    async def wait_for_completed_result(
+        self,
+        job_id: str,
+        *,
+        timeout_seconds: int,
+        poll_interval_seconds: float = 1.0,
+    ):
+        assert job_id == "job-123"
+        return {
+            "jobId": job_id,
+            "status": "completed",
+            "workerId": "azp-local-test",
+            "result": {
+                "source": "stake_ui_sgm_review_slip_batch",
+                "status": "built_for_review",
+                "reviewOnly": True,
+                "fixtureCount": 2,
+                "clickedGroups": 2,
+                "clickedLegs": 4,
+                "groups": [
+                    {
+                        "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                        "status": "built_for_review",
+                        "clickedLegs": 2,
+                    },
+                    {
+                        "fixtureSlug": "46575562-washington-nationals-new-york-mets",
+                        "status": "built_for_review",
+                        "clickedLegs": 2,
+                    },
+                ],
+                "safety": {
+                    "enteredStakeAmount": False,
+                    "clickedPlaceBet": False,
+                },
+            },
+            "error": None,
+        }
+
+
 @pytest.fixture
 def fake_ui_store():
     return FakeCompletedUiJobStore()
@@ -187,6 +266,114 @@ def test_gpt_schema_exposes_review_slip_build_action():
     assert "review" in operation["summary"].lower()
     properties = operation["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert properties["reviewOnly"]["const"] is True
+
+
+def test_gpt_schema_exposes_stake_ui_mlb_games_action():
+    schema = build_gpt_action_openapi_schema("https://azp-test.example")
+
+    operation = schema["paths"]["/mlb/stake-ui/mlb-games"]["post"]
+
+    assert operation["operationId"] == "getStakeUiMlbGames"
+    assert "MLB" in operation["summary"]
+
+
+def test_gpt_schema_exposes_batch_review_slip_action():
+    schema = build_gpt_action_openapi_schema("https://azp-test.example")
+
+    operation = schema["paths"]["/mlb/stake-ui/review-slip-batch"]["post"]
+
+    assert operation["operationId"] == "buildStakeUiReviewSlipBatch"
+    assert "batch" in operation["summary"].lower()
+    properties = operation["requestBody"]["content"]["application/json"]["schema"]["properties"]
+    assert properties["reviewOnly"]["const"] is True
+    assert "groups" in properties
+
+
+def test_stake_ui_mlb_games_route_creates_job_and_returns_completed_result():
+    fake_store = FakeCompletedMlbGamesJobStore()
+    app.dependency_overrides[get_local_ui_job_store] = lambda: fake_store
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/mlb/stake-ui/mlb-games",
+            json={"timeoutSeconds": 2, "limit": 10},
+        )
+
+    body = response.json()
+    created_request = fake_store.created_jobs[0]["request"]
+
+    assert response.status_code == 200
+    assert body["source"] == "stake_ui_mlb_games_via_local_helper"
+    assert body["bridge"]["status"] == "completed"
+    assert body["uiGames"]["returnedGames"] == 2
+    assert body["uiGames"]["games"][0]["fixtureSlug"] == "46575351-new-york-yankees-toronto-blue-jays"
+    assert created_request["purpose"] == "stake_ui_mlb_game_index"
+    assert created_request["limit"] == 10
+
+
+def test_stake_ui_review_slip_batch_route_creates_one_batch_job_with_guardrails():
+    fake_store = FakeCompletedBatchBuildJobStore()
+    app.dependency_overrides[get_local_ui_job_store] = lambda: fake_store
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/mlb/stake-ui/review-slip-batch",
+            json={
+                "reviewOnly": True,
+                "timeoutSeconds": 2,
+                "groups": [
+                    {
+                        "matchup": "Yankees vs Blue Jays",
+                        "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                        "selections": [
+                            {
+                                "market": "Play Home Runs",
+                                "side": "under",
+                                "line": 2.5,
+                                "odds": 1.72,
+                            },
+                            {
+                                "market": "Match Total Bases",
+                                "side": "under",
+                                "line": 25.5,
+                                "odds": 2.47,
+                            },
+                        ],
+                    },
+                    {
+                        "matchup": "Nationals vs Mets",
+                        "fixtureSlug": "46575562-washington-nationals-new-york-mets",
+                        "selections": [
+                            {
+                                "player": "Zack Littell",
+                                "market": "Failed Attempts",
+                                "side": "under",
+                                "line": 2.5,
+                                "odds": 2.15,
+                            },
+                            {
+                                "market": "Play Home Runs",
+                                "side": "under",
+                                "line": 2.5,
+                                "odds": 1.72,
+                            },
+                        ],
+                    },
+                ],
+            },
+        )
+
+    body = response.json()
+    created_request = fake_store.created_jobs[0]["request"]
+
+    assert response.status_code == 200
+    assert body["source"] == "stake_ui_sgm_review_slip_batch_via_local_helper"
+    assert body["result"]["status"] == "built_for_review"
+    assert body["result"]["clickedGroups"] == 2
+    assert body["result"]["safety"]["enteredStakeAmount"] is False
+    assert created_request["reviewOnly"] is True
+    assert created_request["forbiddenActions"] == ["enter_stake_amount", "click_place_bet"]
+    assert len(created_request["groups"]) == 2
 
 
 def test_stake_ui_sgm_board_route_creates_job_and_returns_completed_result(fake_ui_store):

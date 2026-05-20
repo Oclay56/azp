@@ -13,6 +13,10 @@ Build a two-leg Same Game Multi for Braves vs Marlins, unders only. Use the Stak
 ```
 
 ```text
+Use the Stake UI MLB game index. Build one review slip with two under SGM legs from Yankees vs Blue Jays and two under SGM legs from Nationals vs Mets. Use MLB context before choosing, then call the batch review-slip builder once.
+```
+
+```text
 What markets does Stake currently offer for Yankees vs Red Sox?
 ```
 

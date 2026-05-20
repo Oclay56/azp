@@ -14,7 +14,9 @@ from .local_archive import (
     archive_status,
 )
 from .local_ui_bridge import (
+    STAKE_MLB_GAMES_JOB_TYPE,
     STAKE_SGM_BUILD_SLIP_JOB_TYPE,
+    STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE,
     STAKE_SGM_JOB_TYPE,
     LocalUiBridgeDisabled,
     LocalUiBridgeError,
@@ -346,6 +348,104 @@ async def mlb_build_slip_candidates(
     )
 
 
+@app.post("/mlb/stake-ui/mlb-games")
+async def mlb_stake_ui_mlb_games(
+    payload: dict[str, Any] = Body(default_factory=dict),
+    _: None = Depends(require_gpt_api_key),
+    job_store: SupabaseLocalUiJobStore = Depends(get_local_ui_job_store),
+) -> Any:
+    if not job_store.enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "source": "local_ui_bridge",
+                "message": (
+                    "Supabase local UI bridge is not configured. Set SUPABASE_URL "
+                    "and SUPABASE_SERVICE_ROLE_KEY on Render and the local helper."
+                ),
+            },
+        )
+
+    timeout_seconds = _clean_int_from_body(
+        payload,
+        "timeoutSeconds",
+        45,
+        minimum=1,
+        maximum=90,
+    )
+    limit = _clean_int_from_body(payload, "limit", 50, minimum=1, maximum=100)
+    request = {
+        "requestedBy": "custom_gpt",
+        "purpose": "stake_ui_mlb_game_index",
+        "limit": limit,
+    }
+    job: dict[str, Any] | None = None
+    try:
+        job = await job_store.create_job(
+            job_type=STAKE_MLB_GAMES_JOB_TYPE,
+            request=request,
+            timeout_seconds=timeout_seconds,
+        )
+        completed = await job_store.wait_for_completed_result(
+            job["jobId"],
+            timeout_seconds=timeout_seconds,
+        )
+    except LocalUiBridgeDisabled as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+    except LocalUiBridgeTimeout as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "source": "local_ui_bridge",
+                "message": str(exc),
+                "jobId": (job or {}).get("jobId"),
+            },
+        ) from exc
+    except LocalUiBridgeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+
+    if completed.get("status") != "completed":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "source": "local_ui_bridge",
+                "message": completed.get("error") or "Local helper job did not complete.",
+                "status": completed.get("status"),
+                "jobId": completed.get("jobId"),
+            },
+        )
+
+    result = completed.get("result") or {}
+    games = list(result.get("games") or [])[:limit]
+    return {
+        "decisionOwner": "custom_gpt",
+        "source": "stake_ui_mlb_games_via_local_helper",
+        "purpose": "stake_ui_mlb_game_index",
+        "bridge": {
+            "jobId": completed.get("jobId"),
+            "status": completed.get("status"),
+            "workerId": completed.get("workerId"),
+            "createdAt": completed.get("createdAt"),
+            "completedAt": completed.get("completedAt"),
+            "updatedAt": completed.get("updatedAt"),
+        },
+        "uiGames": {
+            "source": result.get("source"),
+            "capturedAt": result.get("capturedAt"),
+            "url": result.get("url"),
+            "returnedGames": len(games),
+            "warnings": result.get("warnings") or [],
+            "games": games,
+        },
+    }
+
+
 @app.post("/mlb/stake-ui/sgm-board")
 async def mlb_stake_ui_sgm_board(
     payload: dict[str, Any] = Body(...),
@@ -604,6 +704,121 @@ async def mlb_stake_ui_review_slip(
             "completedAt": completed.get("completedAt"),
         },
         "result": _compact_review_slip_result(result),
+    }
+
+
+@app.post("/mlb/stake-ui/review-slip-batch")
+async def mlb_stake_ui_review_slip_batch(
+    payload: dict[str, Any] = Body(...),
+    _: None = Depends(require_gpt_api_key),
+    client: StakeClient = Depends(get_stake_client),
+    job_store: SupabaseLocalUiJobStore = Depends(get_local_ui_job_store),
+) -> Any:
+    if not job_store.enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "source": "local_ui_bridge",
+                "message": (
+                    "Supabase local UI bridge is not configured. Set SUPABASE_URL "
+                    "and SUPABASE_SERVICE_ROLE_KEY on Render and the local helper."
+                ),
+            },
+        )
+
+    review_only = _bool_from_body(payload, "reviewOnly", "review_only", True)
+    if not review_only:
+        raise HTTPException(
+            status_code=422,
+            detail="reviewOnly must be true. AZP will not place bets or enter stake amounts.",
+        )
+
+    slate_date = _date_from_body(payload)
+    timeout_seconds = _clean_int_from_body(
+        payload,
+        "timeoutSeconds",
+        60,
+        minimum=1,
+        maximum=180,
+    )
+    schedule_limit = _clean_int_from_body(
+        payload,
+        "scheduleLimit",
+        50,
+        minimum=1,
+        maximum=100,
+    )
+    groups = await _review_slip_groups_from_body(
+        payload,
+        client=client,
+        slate_date=slate_date,
+        schedule_limit=schedule_limit,
+    )
+    request = {
+        "date": slate_date.isoformat() if slate_date else None,
+        "requestedBy": "custom_gpt",
+        "purpose": "stake_ui_sgm_review_slip_batch",
+        "reviewOnly": True,
+        "forbiddenActions": ["enter_stake_amount", "click_place_bet"],
+        "groups": groups,
+    }
+
+    job: dict[str, Any] | None = None
+    try:
+        job = await job_store.create_job(
+            job_type=STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE,
+            request=request,
+            timeout_seconds=timeout_seconds,
+        )
+        completed = await job_store.wait_for_completed_result(
+            job["jobId"],
+            timeout_seconds=timeout_seconds,
+        )
+    except LocalUiBridgeDisabled as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+    except LocalUiBridgeTimeout as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "source": "local_ui_bridge",
+                "message": str(exc),
+                "jobId": (job or {}).get("jobId"),
+            },
+        ) from exc
+    except LocalUiBridgeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+
+    if completed.get("status") != "completed":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "source": "local_ui_bridge",
+                "message": completed.get("error") or "Local helper job did not complete.",
+                "status": completed.get("status"),
+                "jobId": completed.get("jobId"),
+            },
+        )
+
+    result = completed.get("result") or {}
+    return {
+        "decisionOwner": "custom_gpt",
+        "source": "stake_ui_sgm_review_slip_batch_via_local_helper",
+        "purpose": "stake_ui_review_only_batch_slip_builder",
+        "date": slate_date.isoformat() if slate_date else None,
+        "bridge": {
+            "jobId": completed.get("jobId"),
+            "status": completed.get("status"),
+            "workerId": completed.get("workerId"),
+            "createdAt": completed.get("createdAt"),
+            "completedAt": completed.get("completedAt"),
+        },
+        "result": _compact_batch_review_slip_result(result),
     }
 
 
@@ -1012,7 +1227,7 @@ def _review_slip_selections_from_body(payload: dict[str, Any]) -> list[dict[str,
     if len(raw_selections) > 20:
         raise HTTPException(status_code=422, detail="selections cannot contain more than 20 legs")
 
-    required_fields = ("team", "market", "side", "line", "odds")
+    required_fields = ("market", "side", "line", "odds")
     cleaned: list[dict[str, Any]] = []
     for index, raw_selection in enumerate(raw_selections, start=1):
         if not isinstance(raw_selection, dict):
@@ -1048,7 +1263,7 @@ def _review_slip_selections_from_body(payload: dict[str, Any]) -> list[dict[str,
         cleaned.append(
             {
                 "player": _clean_nullable_text(raw_selection.get("player")),
-                "team": str(raw_selection.get("team")).strip(),
+                "team": _clean_nullable_text(raw_selection.get("team")),
                 "market": str(raw_selection.get("market")).strip(),
                 "side": side,
                 "line": line,
@@ -1061,6 +1276,55 @@ def _review_slip_selections_from_body(payload: dict[str, Any]) -> list[dict[str,
             }
         )
     return cleaned
+
+
+async def _review_slip_groups_from_body(
+    payload: dict[str, Any],
+    *,
+    client: StakeClient,
+    slate_date: date | None,
+    schedule_limit: int,
+) -> list[dict[str, Any]]:
+    raw_groups = payload.get("groups")
+    if not isinstance(raw_groups, list) or not raw_groups:
+        raise HTTPException(
+            status_code=422,
+            detail="groups must be a non-empty list of fixture selection groups",
+        )
+    if len(raw_groups) > 15:
+        raise HTTPException(status_code=422, detail="groups cannot contain more than 15 games")
+
+    groups: list[dict[str, Any]] = []
+    for index, raw_group in enumerate(raw_groups, start=1):
+        if not isinstance(raw_group, dict):
+            raise HTTPException(status_code=422, detail=f"group {index} must be an object")
+
+        matchup = str(raw_group.get("matchup") or "").strip()
+        fixture_slug = str(raw_group.get("fixtureSlug") or "").strip()
+        if not fixture_slug:
+            if not matchup:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"group {index} must include fixtureSlug or matchup",
+                )
+            fixture_slug = await _resolve_stake_fixture_slug(
+                client=client,
+                matchup=matchup,
+                slate_date=slate_date,
+                limit=schedule_limit,
+            )
+
+        selections = _review_slip_selections_from_body(
+            {"selections": raw_group.get("selections")}
+        )
+        groups.append(
+            {
+                "matchup": matchup or None,
+                "fixtureSlug": fixture_slug,
+                "selections": selections,
+            }
+        )
+    return groups
 
 
 def _clean_nullable_text(value: Any) -> str | None:
@@ -1083,6 +1347,47 @@ def _compact_review_slip_result(result: dict[str, Any]) -> dict[str, Any]:
         "clickResults": result.get("clickResults") or [],
         "addBetResult": result.get("addBetResult") or {},
         "warnings": result.get("warnings") or [],
+        "safety": {
+            "enteredStakeAmount": False,
+            "clickedPlaceBet": False,
+            **(result.get("safety") or {}),
+        },
+    }
+
+
+def _compact_batch_review_slip_result(result: dict[str, Any]) -> dict[str, Any]:
+    groups = []
+    for group in result.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        groups.append(
+            {
+                "source": group.get("source"),
+                "matchup": group.get("matchup"),
+                "fixtureSlug": group.get("fixtureSlug"),
+                "capturedAt": group.get("capturedAt"),
+                "status": group.get("status"),
+                "reviewOnly": bool(group.get("reviewOnly", True)),
+                "clickedLegs": int(group.get("clickedLegs") or 0),
+                "selectedRows": group.get("selectedRows") or [],
+                "missingSelections": group.get("missingSelections") or [],
+                "clickResults": group.get("clickResults") or [],
+                "addBetResult": group.get("addBetResult") or {},
+                "warnings": group.get("warnings") or [],
+            }
+        )
+
+    return {
+        "source": result.get("source"),
+        "capturedAt": result.get("capturedAt"),
+        "status": result.get("status"),
+        "reviewOnly": bool(result.get("reviewOnly", True)),
+        "fixtureCount": int(result.get("fixtureCount") or 0),
+        "processedGroups": int(result.get("processedGroups") or 0),
+        "clickedGroups": int(result.get("clickedGroups") or 0),
+        "clickedLegs": int(result.get("clickedLegs") or 0),
+        "stopReason": result.get("stopReason"),
+        "groups": groups,
         "safety": {
             "enteredStakeAmount": False,
             "clickedPlaceBet": False,

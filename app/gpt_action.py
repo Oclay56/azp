@@ -183,6 +183,18 @@ def build_gpt_action_openapi_schema(server_url: str) -> dict[str, Any]:
                     request_body=_stake_ui_sgm_request_body(),
                 )
             },
+            "/mlb/stake-ui/mlb-games": {
+                "post": _operation(
+                    "getStakeUiMlbGames",
+                    "Get Stake UI MLB games",
+                    (
+                        "Creates a local-helper job that reads the visible Stake MLB "
+                        "game index through the user's Chrome/VPN session. Use this "
+                        "before multi-game SGM work so fixture slugs come from the UI."
+                    ),
+                    request_body=_stake_ui_mlb_games_request_body(),
+                )
+            },
             "/mlb/stake-ui/review-slip": {
                 "post": _operation(
                     "buildStakeUiReviewSlip",
@@ -193,6 +205,19 @@ def build_gpt_action_openapi_schema(server_url: str) -> dict[str, Any]:
                         "must never enter stake amount or click Place Bet."
                     ),
                     request_body=_stake_ui_review_slip_request_body(),
+                )
+            },
+            "/mlb/stake-ui/review-slip-batch": {
+                "post": _operation(
+                    "buildStakeUiReviewSlipBatch",
+                    "Build batch Stake UI review slip",
+                    (
+                        "Creates one local-helper batch job that navigates one Stake "
+                        "page through multiple fixture SGM boards and adds each exact "
+                        "validated group into the same visible slip for review only. "
+                        "This action must never enter stake amount or click Place Bet."
+                    ),
+                    request_body=_stake_ui_review_slip_batch_request_body(),
                 )
             },
             "/mlb/matchup/{matchup}/probable-pitchers": {
@@ -2483,8 +2508,31 @@ def _stake_ui_sgm_request_body() -> dict[str, Any]:
     }
 
 
-def _stake_ui_review_slip_request_body() -> dict[str, Any]:
-    exact_selection_schema = {
+def _stake_ui_mlb_games_request_body() -> dict[str, Any]:
+    return {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 100,
+                            "description": "Maximum visible Stake MLB games to return.",
+                        },
+                        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 90},
+                    },
+                    "additionalProperties": True,
+                }
+            }
+        },
+    }
+
+
+def _stake_ui_exact_selection_schema() -> dict[str, Any]:
+    return {
         "type": "object",
         "properties": {
             "player": {
@@ -2502,9 +2550,13 @@ def _stake_ui_review_slip_request_body() -> dict[str, Any]:
             "lineId": {"type": "string"},
             "marketId": {"type": "string"},
         },
-        "required": ["team", "market", "side", "line", "odds"],
+        "required": ["market", "side", "line", "odds"],
         "additionalProperties": True,
     }
+
+
+def _stake_ui_review_slip_request_body() -> dict[str, Any]:
+    exact_selection_schema = _stake_ui_exact_selection_schema()
     return {
         "required": True,
         "content": {
@@ -2537,6 +2589,63 @@ def _stake_ui_review_slip_request_body() -> dict[str, Any]:
                         "scheduleLimit": {"type": "integer", "minimum": 1, "maximum": 100},
                     },
                     "required": ["matchup", "reviewOnly", "selections"],
+                    "additionalProperties": True,
+                }
+            }
+        },
+    }
+
+
+def _stake_ui_review_slip_batch_request_body() -> dict[str, Any]:
+    exact_selection_schema = _stake_ui_exact_selection_schema()
+    return {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "date": {"type": "string", "format": "date"},
+                        "reviewOnly": {
+                            "type": "boolean",
+                            "const": True,
+                            "description": "Must be true. The helper only builds a visible slip for user review.",
+                        },
+                        "groups": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 15,
+                            "description": (
+                                "Each item is one game's exact UI-backed SGM legs. "
+                                "The local helper processes these groups through one "
+                                "Stake page so they land in the same visible slip."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "matchup": {
+                                        "type": "string",
+                                        "description": "Matchup text, for example Yankees vs Blue Jays.",
+                                    },
+                                    "fixtureSlug": {
+                                        "type": "string",
+                                        "description": "Stake fixture slug from getStakeUiMlbGames or getStakeUiSgmBoard.",
+                                    },
+                                    "selections": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "maxItems": 20,
+                                        "items": exact_selection_schema,
+                                    },
+                                },
+                                "required": ["selections"],
+                                "additionalProperties": True,
+                            },
+                        },
+                        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 180},
+                        "scheduleLimit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    },
+                    "required": ["reviewOnly", "groups"],
                     "additionalProperties": True,
                 }
             }

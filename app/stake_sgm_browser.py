@@ -1,11 +1,48 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
+STAKE_MLB_URL = "https://stake.com/sports/baseball/usa/mlb"
+
+MLB_TEAM_SLUGS = {
+    "arizona-diamondbacks": "Arizona Diamondbacks",
+    "atlanta-braves": "Atlanta Braves",
+    "baltimore-orioles": "Baltimore Orioles",
+    "boston-red-sox": "Boston Red Sox",
+    "chicago-cubs": "Chicago Cubs",
+    "chicago-white-sox": "Chicago White Sox",
+    "cincinnati-reds": "Cincinnati Reds",
+    "cleveland-guardians": "Cleveland Guardians",
+    "colorado-rockies": "Colorado Rockies",
+    "detroit-tigers": "Detroit Tigers",
+    "houston-astros": "Houston Astros",
+    "kansas-city-royals": "Kansas City Royals",
+    "los-angeles-angels": "Los Angeles Angels",
+    "los-angeles-dodgers": "Los Angeles Dodgers",
+    "miami-marlins": "Miami Marlins",
+    "milwaukee-brewers": "Milwaukee Brewers",
+    "minnesota-twins": "Minnesota Twins",
+    "new-york-mets": "New York Mets",
+    "new-york-yankees": "New York Yankees",
+    "oakland-athletics": "Oakland Athletics",
+    "athletics": "Athletics",
+    "philadelphia-phillies": "Philadelphia Phillies",
+    "pittsburgh-pirates": "Pittsburgh Pirates",
+    "san-diego-padres": "San Diego Padres",
+    "san-francisco-giants": "San Francisco Giants",
+    "seattle-mariners": "Seattle Mariners",
+    "st-louis-cardinals": "St. Louis Cardinals",
+    "tampa-bay-rays": "Tampa Bay Rays",
+    "texas-rangers": "Texas Rangers",
+    "toronto-blue-jays": "Toronto Blue Jays",
+    "washington-nationals": "Washington Nationals",
+}
 
 SGM_BOARD_QUERY = """
 query AzpSgmBoard($fixture: String!) {
@@ -109,6 +146,36 @@ def read_stake_sgm_board(
         return normalize_sgm_response(fixture_slug, response, warnings)
 
 
+def read_stake_mlb_games(
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+    limit: int = 50,
+) -> dict[str, Any]:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        if not browser.contexts:
+            raise RuntimeError("No Chrome context found on the debug port.")
+
+        page = _find_or_open_mlb_page(browser.contexts[0])
+        warnings = _check_stake_page_access(page)
+        games = _extract_mlb_game_links(page, limit=limit)
+        if not games:
+            warnings.append(
+                "No MLB fixture links were visible on the Stake MLB page. "
+                "The page may still be loading or Stake may have virtualized the list."
+            )
+        return {
+            "source": "stake_ui_mlb_games",
+            "capturedAt": datetime.now(timezone.utc).isoformat(),
+            "url": page.url,
+            "returnedGames": len(games),
+            "games": games,
+            "warnings": warnings,
+        }
+
+
 def build_stake_sgm_review_slip(
     fixture_slug: str,
     selections: list[dict[str, Any]],
@@ -171,6 +238,134 @@ def build_stake_sgm_review_slip(
             click_results=click_results,
             add_bet_result=add_bet_result,
         )
+
+
+def build_stake_sgm_review_slip_batch(
+    groups: list[dict[str, Any]],
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+) -> dict[str, Any]:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        if not browser.contexts:
+            raise RuntimeError("No Chrome context found on the debug port.")
+
+        context = browser.contexts[0]
+        page = _shared_stake_page(context)
+        results: list[dict[str, Any]] = []
+        stop_reason: str | None = None
+
+        for group in groups:
+            fixture_slug = str(group.get("fixtureSlug") or "").strip()
+            if not fixture_slug:
+                results.append(
+                    {
+                        "source": "stake_ui_sgm_build_slip",
+                        "status": "blocked_missing_fixture_slug",
+                        "reviewOnly": True,
+                        "clickedLegs": 0,
+                        "request": group,
+                        "safety": {
+                            "enteredStakeAmount": False,
+                            "clickedAddBet": False,
+                            "clickedPlaceBet": False,
+                        },
+                    }
+                )
+                stop_reason = "missing_fixture_slug"
+                break
+
+            page.goto(fixture_url(fixture_slug), wait_until="domcontentloaded", timeout=45_000)
+            warnings = _check_page_ready(page, fixture_slug=fixture_slug)
+            response = _fetch_sgm_board_in_browser(page, fixture_slug)
+            board = normalize_sgm_response(fixture_slug, response, warnings)
+            selections = list(group.get("selections") or [])
+            if _has_logged_out_warning(warnings):
+                result = _review_slip_result(
+                    fixture_slug=fixture_slug,
+                    status="blocked_login_required",
+                    board=board,
+                    selected_rows=[],
+                    missing_selections=[],
+                    click_results=[],
+                )
+            else:
+                match_result = match_sgm_review_selections(board, selections)
+                if match_result["missingSelections"]:
+                    result = _review_slip_result(
+                        fixture_slug=fixture_slug,
+                        status="blocked_exact_ui_match_failed",
+                        board=board,
+                        selected_rows=match_result["matchedRows"],
+                        missing_selections=match_result["missingSelections"],
+                        click_results=[],
+                    )
+                else:
+                    click_results = _click_sgm_review_selections(page, match_result["matchedRows"])
+                    failed_clicks = [
+                        row for row in click_results if row.get("status") != "clicked"
+                    ]
+                    if failed_clicks:
+                        _clear_sgm_working_selection(page)
+                    add_bet_result = (
+                        _click_sgm_add_bet_button(
+                            page,
+                            expected_legs=len(match_result["matchedRows"]),
+                        )
+                        if not failed_clicks
+                        else {"status": "not_attempted", "reason": "selection_click_failed"}
+                    )
+                    status = (
+                        "built_for_review"
+                        if not failed_clicks and add_bet_result.get("status") == "clicked"
+                        else "blocked_add_bet_failed"
+                        if not failed_clicks
+                        else "blocked_click_failed"
+                    )
+                    result = _review_slip_result(
+                        fixture_slug=fixture_slug,
+                        status=status,
+                        board=board,
+                        selected_rows=match_result["matchedRows"],
+                        missing_selections=[],
+                        click_results=click_results,
+                        add_bet_result=add_bet_result,
+                    )
+
+            result["matchup"] = group.get("matchup")
+            results.append(result)
+            if result.get("status") != "built_for_review":
+                stop_reason = str(result.get("status") or "blocked")
+                break
+
+        clicked_groups = sum(1 for result in results if result.get("status") == "built_for_review")
+        clicked_legs = sum(int(result.get("clickedLegs") or 0) for result in results)
+        status = (
+            "built_for_review"
+            if clicked_groups == len(groups) and not stop_reason
+            else "partial_review_slip"
+            if clicked_groups
+            else "blocked"
+        )
+        return {
+            "source": "stake_ui_sgm_review_slip_batch",
+            "capturedAt": datetime.now(timezone.utc).isoformat(),
+            "status": status,
+            "reviewOnly": True,
+            "fixtureCount": len(groups),
+            "processedGroups": len(results),
+            "clickedGroups": clicked_groups,
+            "clickedLegs": clicked_legs,
+            "stopReason": stop_reason,
+            "groups": results,
+            "safety": {
+                "enteredStakeAmount": False,
+                "clickedAddBet": bool(clicked_groups),
+                "clickedPlaceBet": False,
+            },
+        }
 
 
 def match_sgm_review_selections(
@@ -1064,6 +1259,140 @@ def _find_or_open_fixture_page(context: Any, fixture_slug: str) -> Any:
     page = context.pages[0] if context.pages else context.new_page()
     page.goto(expected, wait_until="domcontentloaded", timeout=45_000)
     return page
+
+
+def _shared_stake_page(context: Any) -> Any:
+    for page in context.pages:
+        if "stake.com" in str(page.url):
+            return page
+    return context.pages[0] if context.pages else context.new_page()
+
+
+def _find_or_open_mlb_page(context: Any) -> Any:
+    for page in context.pages:
+        if "stake.com" in str(page.url) and "/sports/baseball/usa/mlb" in str(page.url):
+            if _restricted_region_url(page.url):
+                page.goto(STAKE_MLB_URL, wait_until="domcontentloaded", timeout=45_000)
+            return page
+
+    page = _shared_stake_page(context)
+    page.goto(STAKE_MLB_URL, wait_until="domcontentloaded", timeout=45_000)
+    return page
+
+
+def _check_stake_page_access(page: Any) -> list[str]:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    warnings: list[str] = []
+    try:
+        page.wait_for_load_state("networkidle", timeout=10_000)
+    except PlaywrightTimeoutError:
+        warnings.append("page did not reach networkidle before continuing")
+
+    body = page.locator("body").inner_text(timeout=8_000)
+    normalized_body = body.lower()
+    if (
+        "performing security verification" in normalized_body
+        or "protect against malicious bots" in normalized_body
+        or "cloudflare" in normalized_body and "verification" in normalized_body
+    ):
+        raise RuntimeError(
+            "Stake Cloudflare verification is required in the helper Chrome session. "
+            "Complete the browser verification manually, then retry."
+        )
+    if _is_region_blocked_body(body):
+        raise RuntimeError(
+            "Stake is still region-blocked in this browser session. "
+            "Turn on the desktop VPN before starting the helper, close this helper, "
+            "then retry."
+        )
+    if "Login" in body and "Register" in body and "Wallet" not in body:
+        warnings.append(
+            "browser appears logged out; read-only UI data may still load, "
+            "but account-only actions will not"
+        )
+    return warnings
+
+
+def _extract_mlb_game_links(page: Any, *, limit: int) -> list[dict[str, Any]]:
+    raw_links = page.evaluate(
+        """
+        () => Array.from(document.querySelectorAll('a[href*="/sports/baseball/usa/mlb/"]'))
+          .map((anchor) => {
+            const href = anchor.href || anchor.getAttribute('href') || '';
+            const card = anchor.closest('a, article, section, div');
+            return {
+              href,
+              text: (card?.innerText || anchor.innerText || '').trim().replace(/\\s+/g, ' ')
+            };
+          })
+        """
+    )
+    games: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw in raw_links or []:
+        link = _normalize_mlb_game_link((raw or {}).get("href"))
+        if not link or link["fixtureSlug"] in seen:
+            continue
+        seen.add(link["fixtureSlug"])
+        status_text = _fixture_status_text_from_card_text((raw or {}).get("text"))
+        if status_text:
+            link["statusText"] = status_text
+        games.append(link)
+        if len(games) >= max(limit, 1):
+            break
+    return games
+
+
+def _normalize_mlb_game_link(href: Any) -> dict[str, Any] | None:
+    if not href:
+        return None
+    absolute = urljoin("https://stake.com", str(href))
+    parsed = urlparse(absolute)
+    path = parsed.path.strip("/")
+    match = re.search(r"(?:^|/)sports/baseball/usa/mlb/(\d+[a-z0-9-]*)$", path)
+    if not match:
+        return None
+
+    fixture_slug = match.group(1)
+    matchup = _fixture_matchup_from_slug(fixture_slug)
+    return {
+        "fixtureSlug": fixture_slug,
+        "url": absolute,
+        "matchup": matchup["matchup"],
+        "teams": matchup["teams"],
+    }
+
+
+def _fixture_matchup_from_slug(fixture_slug: str) -> dict[str, Any]:
+    slug_without_id = re.sub(r"^\d+-", "", str(fixture_slug or "").strip().lower())
+    for left_slug, left_name in MLB_TEAM_SLUGS.items():
+        prefix = f"{left_slug}-"
+        if not slug_without_id.startswith(prefix):
+            continue
+        right_slug = slug_without_id[len(prefix) :]
+        right_name = MLB_TEAM_SLUGS.get(right_slug)
+        if right_name:
+            return {
+                "matchup": f"{left_name} vs {right_name}",
+                "teams": [left_name, right_name],
+            }
+
+    parts = [part for part in slug_without_id.split("-") if part]
+    midpoint = max(len(parts) // 2, 1)
+    teams = [
+        " ".join(parts[:midpoint]).title(),
+        " ".join(parts[midpoint:]).title(),
+    ]
+    return {"matchup": f"{teams[0]} vs {teams[1]}", "teams": teams}
+
+
+def _fixture_status_text_from_card_text(text: Any) -> str | None:
+    normalized = str(text or "").upper()
+    for marker in ("NOT STARTED", "STARTS AT", "LIVE", "IN PLAY"):
+        if marker in normalized:
+            return marker
+    return None
 
 
 def _restricted_region_url(url: str) -> bool:
