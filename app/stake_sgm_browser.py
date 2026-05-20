@@ -339,6 +339,10 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
             .replace(/[^a-z0-9.]+/g, " ")
             .replace(/\\s+/g, " ")
             .trim();
+          const numberValue = (value) => {
+            const parsed = Number(String(value || "").replace(",", "."));
+            return Number.isFinite(parsed) ? parsed : null;
+          };
           const visible = (el) => {
             const style = window.getComputedStyle(el);
             const rect = el.getBoundingClientRect();
@@ -354,46 +358,100 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
             line: norm(row.line),
             side: norm(row.side),
           };
-          const oddsVariants = [String(oddsText), String(oddsText).replace(".", ",")];
+          const targetOdds = numberValue(row.odds) ?? numberValue(row[wanted.side]) ?? numberValue(oddsText);
+          const targetLine = numberValue(row.line);
+          const oddsVariants = [
+            String(oddsText),
+            String(oddsText).replace(".", ","),
+            targetOdds == null ? "" : targetOdds.toFixed(2),
+            targetOdds == null ? "" : targetOdds.toFixed(2).replace(".", ","),
+          ].filter(Boolean);
+          const textHasNumber = (text, target, tolerance) => {
+            if (target == null) {
+              return false;
+            }
+            const matches = String(text || "").match(/\\d+(?:[.,]\\d+)?/g) || [];
+            return matches.some((value) => {
+              const parsed = numberValue(value);
+              return parsed != null && Math.abs(parsed - target) <= tolerance;
+            });
+          };
+          const textHasOdds = (text) => (
+            targetOdds == null
+              ? oddsVariants.some((odds) => String(text || "").trim() === odds)
+              : textHasNumber(text, targetOdds, 0.006)
+          );
+          const textHasLine = (text) => (
+            wanted.line ? text.includes(wanted.line) : true
+          ) || textHasNumber(text, targetLine, 0.001);
           const clickableSelector = "button,[role='button'],[tabindex='0']";
-          const candidates = Array.from(document.querySelectorAll(clickableSelector))
+          const buttonCandidates = Array.from(document.querySelectorAll(clickableSelector))
             .filter(visible)
             .filter((el) => {
               const text = String(el.innerText || el.textContent || "").trim();
-              return oddsVariants.some((odds) => text === odds || text.includes(odds));
+              return textHasOdds(text);
             });
+          const broadCandidates = buttonCandidates.length ? [] : Array.from(document.querySelectorAll("body *"))
+            .filter(visible)
+            .filter((el) => {
+              const rect = el.getBoundingClientRect();
+              const text = String(el.innerText || el.textContent || "").trim();
+              return rect.width <= 360
+                && rect.height <= 100
+                && wanted.side
+                && norm(text).includes(wanted.side)
+                && textHasOdds(text);
+            });
+          const candidates = buttonCandidates.length ? buttonCandidates : broadCandidates;
 
           const scopedCandidates = [];
           for (const el of candidates) {
             let current = el;
-            for (let depth = 0; depth < 7 && current; depth += 1) {
+            for (let depth = 0; depth < 14 && current; depth += 1) {
               const text = norm(current.innerText || current.textContent || "");
               const hasOwner = wanted.player
                 ? text.includes(wanted.player)
                 : text.includes(wanted.team);
               const hasSide = wanted.side ? text.includes(wanted.side) : true;
-              if (hasOwner && hasSide && text.includes(wanted.line)) {
-                scopedCandidates.push({ el, text: text.slice(0, 400) });
+              if (hasOwner && hasSide && textHasLine(text)) {
+                const rect = el.getBoundingClientRect();
+                scopedCandidates.push({
+                  el,
+                  text: text.slice(0, 400),
+                  area: rect.width * rect.height,
+                  rect: {
+                    x: Math.round(rect.x),
+                    y: Math.round(rect.y),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                  },
+                });
                 break;
               }
               current = current.parentElement;
             }
           }
 
-          if (scopedCandidates.length !== 1) {
+          scopedCandidates.sort((a, b) => a.area - b.area);
+
+          if (scopedCandidates.length < 1) {
             return {
               status: "not_clicked",
-              reason: scopedCandidates.length === 0
-                ? "no visible exact clickable odds cell found"
-                : "ambiguous clickable odds cells found",
+              reason: "no visible exact clickable odds cell found",
               candidateCount: scopedCandidates.length,
               oddsVariants,
               candidateSamples: scopedCandidates.slice(0, 5).map((candidate) => candidate.text),
             };
           }
 
+          scopedCandidates[0].el.scrollIntoView({ block: "center", inline: "center" });
           scopedCandidates[0].el.click();
-          return { status: "clicked", candidateCount: 1 };
+          return {
+            status: "clicked",
+            candidateCount: scopedCandidates.length,
+            clickedSample: scopedCandidates[0].text,
+            clickedRect: scopedCandidates[0].rect,
+          };
         }
         """,
         {"row": row, "oddsText": _display_number(row.get("odds"))},
