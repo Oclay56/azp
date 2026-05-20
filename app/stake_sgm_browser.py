@@ -148,6 +148,8 @@ def build_stake_sgm_review_slip(
 
         click_results = _click_sgm_review_selections(page, match_result["matchedRows"])
         failed_clicks = [row for row in click_results if row.get("status") != "clicked"]
+        if failed_clicks:
+            _clear_sgm_working_selection(page)
         status = "built_for_review" if not failed_clicks else "blocked_click_failed"
         return _review_slip_result(
             fixture_slug=fixture_slug,
@@ -302,6 +304,7 @@ def _find_exact_selection_row(
 def _click_sgm_review_selections(page: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     click_results: list[dict[str, Any]] = []
     _open_same_game_multi_tab(page)
+    _clear_sgm_working_selection(page)
 
     for row in rows:
         result = _click_one_sgm_selection(page, row)
@@ -309,6 +312,37 @@ def _click_sgm_review_selections(page: Any, rows: list[dict[str, Any]]) -> list[
         if result.get("status") != "clicked":
             break
     return click_results
+
+
+def _clear_sgm_working_selection(page: Any) -> None:
+    try:
+        page.evaluate(
+            """
+            () => {
+              const norm = (value) => String(value || "")
+                .toLowerCase()
+                .replace(/\\s+/g, " ")
+                .trim();
+              const visible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.visibility !== "hidden"
+                  && style.display !== "none"
+                  && rect.width > 0
+                  && rect.height > 0;
+              };
+              const button = Array.from(document.querySelectorAll("button,[role='button']"))
+                .filter(visible)
+                .find((el) => norm(el.innerText || el.textContent || "") === "remove all");
+              if (button && !button.disabled && button.getAttribute("aria-disabled") !== "true") {
+                button.click();
+              }
+            }
+            """
+        )
+        page.wait_for_timeout(300)
+    except Exception:
+        return
 
 
 def _open_same_game_multi_tab(page: Any) -> None:
@@ -333,7 +367,7 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
 
     click_result = page.evaluate(
         """
-        ({ row, oddsText }) => {
+        async ({ row, oddsText }) => {
           const norm = (value) => String(value || "")
             .toLowerCase()
             .replace(/[^a-z0-9.]+/g, " ")
@@ -358,6 +392,17 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
             line: norm(row.line),
             side: norm(row.side),
           };
+          const marketAliases = {
+            "earned runs": ["earned runs", "runs achieved", "runs allowed"],
+            "first er": ["first er", "first earned run", "first well deserved run"],
+            "first so": ["first so", "first strike out", "first strikeout"],
+            "hits allowed": ["hits allowed"],
+            "outs": ["outs", "eliminated"],
+            "strikeouts": ["strikeouts", "failed attempts"],
+            "walks": ["walks"],
+            "win probability": ["win probability", "probability of winning"],
+          };
+          const aliases = (marketAliases[wanted.market] || [wanted.market]).filter(Boolean);
           const targetOdds = numberValue(row.odds) ?? numberValue(row[wanted.side]) ?? numberValue(oddsText);
           const targetLine = numberValue(row.line);
           const oddsVariants = [
@@ -384,55 +429,80 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
           const textHasLine = (text) => (
             wanted.line ? text.includes(wanted.line) : true
           ) || textHasNumber(text, targetLine, 0.001);
-          const clickableSelector = "button,[role='button'],[tabindex='0']";
-          const buttonCandidates = Array.from(document.querySelectorAll(clickableSelector))
-            .filter(visible)
-            .filter((el) => {
-              const text = String(el.innerText || el.textContent || "").trim();
-              return textHasOdds(text);
-            });
-          const broadCandidates = buttonCandidates.length ? [] : Array.from(document.querySelectorAll("body *"))
-            .filter(visible)
-            .filter((el) => {
-              const rect = el.getBoundingClientRect();
-              const text = String(el.innerText || el.textContent || "").trim();
-              return rect.width <= 360
-                && rect.height <= 100
-                && wanted.side
-                && norm(text).includes(wanted.side)
-                && textHasOdds(text);
-            });
-          const candidates = buttonCandidates.length ? buttonCandidates : broadCandidates;
-
-          const scopedCandidates = [];
-          for (const el of candidates) {
-            let current = el;
-            for (let depth = 0; depth < 14 && current; depth += 1) {
-              const text = norm(current.innerText || current.textContent || "");
-              const hasOwner = wanted.player
-                ? text.includes(wanted.player)
-                : text.includes(wanted.team);
-              const hasSide = wanted.side ? text.includes(wanted.side) : true;
-              if (hasOwner && hasSide && textHasLine(text)) {
-                const rect = el.getBoundingClientRect();
-                scopedCandidates.push({
-                  el,
-                  text: text.slice(0, 400),
-                  area: rect.width * rect.height,
-                  rect: {
-                    x: Math.round(rect.x),
-                    y: Math.round(rect.y),
-                    width: Math.round(rect.width),
-                    height: Math.round(rect.height),
-                  },
-                });
-                break;
-              }
-              current = current.parentElement;
+          const rowHasMarket = (text) => !aliases.length || aliases.some((alias) => text.includes(alias));
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const candidateElements = () => {
+            const sideSelector = wanted.side
+              ? `button[data-testid="fixture-outcome"][aria-label="${wanted.side[0].toUpperCase()}${wanted.side.slice(1)}"]`
+              : "button[data-testid='fixture-outcome']";
+            const sideButtons = Array.from(document.querySelectorAll(sideSelector))
+              .filter(visible)
+              .filter((el) => textHasOdds(String(el.innerText || el.textContent || "").trim()));
+            if (sideButtons.length) {
+              return sideButtons;
             }
-          }
+            return Array.from(document.querySelectorAll("button,[role='button'],[tabindex='0'],body *"))
+              .filter(visible)
+              .filter((el) => {
+                const rect = el.getBoundingClientRect();
+                const text = String(el.innerText || el.textContent || "").trim();
+                return rect.width <= 360
+                  && rect.height <= 100
+                  && wanted.side
+                  && norm(text).includes(wanted.side)
+                  && textHasOdds(text);
+              });
+          };
 
-          scopedCandidates.sort((a, b) => a.area - b.area);
+          let scopedCandidates = [];
+          let lastCandidateSamples = [];
+          for (let attempt = 0; attempt < 24; attempt += 1) {
+            const candidates = candidateElements();
+            lastCandidateSamples = candidates.slice(0, 8).map((el) => String(el.innerText || el.textContent || "").trim());
+            scopedCandidates = [];
+            for (const el of candidates) {
+              let current = el;
+              let ownerMatched = false;
+              let marketLineMatched = false;
+              let matchedText = "";
+              for (let depth = 0; depth < 16 && current; depth += 1) {
+                const text = norm(current.innerText || current.textContent || "");
+                const hasOwner = wanted.player
+                  ? text.includes(wanted.player)
+                  : text.includes(wanted.team);
+                if (hasOwner) {
+                  ownerMatched = true;
+                }
+                const hasSide = wanted.side ? text.includes(wanted.side) : true;
+                if (hasSide && textHasLine(text) && rowHasMarket(text)) {
+                  marketLineMatched = true;
+                  matchedText = text.slice(0, 500);
+                }
+                if (ownerMatched && marketLineMatched) {
+                  const rect = el.getBoundingClientRect();
+                  scopedCandidates.push({
+                    el,
+                    text: matchedText,
+                    leafText: String(el.innerText || el.textContent || "").trim(),
+                    area: rect.width * rect.height,
+                    rect: {
+                      x: Math.round(rect.x),
+                      y: Math.round(rect.y),
+                      width: Math.round(rect.width),
+                      height: Math.round(rect.height),
+                    },
+                  });
+                  break;
+                }
+                current = current.parentElement;
+              }
+            }
+            scopedCandidates.sort((a, b) => a.area - b.area);
+            if (scopedCandidates.length > 0) {
+              break;
+            }
+            await sleep(250);
+          }
 
           if (scopedCandidates.length < 1) {
             return {
@@ -440,7 +510,8 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
               reason: "no visible exact clickable odds cell found",
               candidateCount: scopedCandidates.length,
               oddsVariants,
-              candidateSamples: scopedCandidates.slice(0, 5).map((candidate) => candidate.text),
+              marketAliases: aliases,
+              candidateSamples: lastCandidateSamples,
             };
           }
 
@@ -464,12 +535,59 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
 
 def _expand_sgm_owner(page: Any, value: str) -> None:
     try:
+        if _sgm_owner_has_visible_outcomes(page, value):
+            return
         owner = page.get_by_text(value, exact=False)
         if owner.count():
             owner.first.click(timeout=3_000)
-            page.wait_for_timeout(700)
+            for _ in range(10):
+                page.wait_for_timeout(250)
+                if _sgm_owner_has_visible_outcomes(page, value):
+                    return
     except Exception:
         return
+
+
+def _sgm_owner_has_visible_outcomes(page: Any, value: str) -> bool:
+    try:
+        return bool(
+            page.evaluate(
+                """
+                (value) => {
+                  const norm = (input) => String(input || "")
+                    .toLowerCase()
+                    .replace(/[^a-z0-9.]+/g, " ")
+                    .replace(/\\s+/g, " ")
+                    .trim();
+                  const wanted = norm(value);
+                  const visible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style.visibility !== "hidden"
+                      && style.display !== "none"
+                      && rect.width > 0
+                      && rect.height > 0;
+                  };
+                  const outcomes = Array.from(document.querySelectorAll('button[data-testid="fixture-outcome"]'))
+                    .filter(visible);
+                  return outcomes.some((button) => {
+                    let current = button;
+                    for (let depth = 0; depth < 16 && current; depth += 1) {
+                      const text = norm(current.innerText || current.textContent || "");
+                      if (text.includes(wanted)) {
+                        return true;
+                      }
+                      current = current.parentElement;
+                    }
+                    return false;
+                  });
+                }
+                """,
+                value,
+            )
+        )
+    except Exception:
+        return False
 
 
 def _filter_sgm_board(page: Any, value: str) -> None:
