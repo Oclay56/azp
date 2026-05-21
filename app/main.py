@@ -15,9 +15,11 @@ from .local_archive import (
 )
 from .local_ui_bridge import (
     STAKE_MLB_GAMES_JOB_TYPE,
+    STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE,
     STAKE_SGM_BUILD_SLIP_JOB_TYPE,
     STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE,
     STAKE_SGM_JOB_TYPE,
+    STAKE_UI_STATE_JOB_TYPE,
     LocalUiBridgeDisabled,
     LocalUiBridgeError,
     LocalUiBridgeTimeout,
@@ -444,6 +446,170 @@ async def mlb_stake_ui_mlb_games(
             "warnings": result.get("warnings") or [],
             "games": games,
         },
+    }
+
+
+@app.post("/mlb/stake-ui/state")
+async def mlb_stake_ui_state(
+    payload: dict[str, Any] = Body(default_factory=dict),
+    _: None = Depends(require_gpt_api_key),
+    job_store: SupabaseLocalUiJobStore = Depends(get_local_ui_job_store),
+) -> Any:
+    if not job_store.enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "source": "local_ui_bridge",
+                "message": (
+                    "Supabase local UI bridge is not configured. Set SUPABASE_URL "
+                    "and SUPABASE_SERVICE_ROLE_KEY on Render and the local helper."
+                ),
+            },
+        )
+
+    timeout_seconds = _clean_int_from_body(
+        payload,
+        "timeoutSeconds",
+        20,
+        minimum=1,
+        maximum=60,
+    )
+    fixture_slug = str(payload.get("fixtureSlug") or "").strip()
+    request = {
+        "requestedBy": "custom_gpt",
+        "purpose": "stake_ui_diagnostics",
+        "fixtureSlug": fixture_slug or None,
+    }
+    job: dict[str, Any] | None = None
+    try:
+        job = await job_store.create_job(
+            job_type=STAKE_UI_STATE_JOB_TYPE,
+            request=request,
+            timeout_seconds=timeout_seconds,
+        )
+        completed = await job_store.wait_for_completed_result(
+            job["jobId"],
+            timeout_seconds=timeout_seconds,
+        )
+    except LocalUiBridgeDisabled as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+    except LocalUiBridgeTimeout as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "source": "local_ui_bridge",
+                "message": str(exc),
+                "jobId": (job or {}).get("jobId"),
+            },
+        ) from exc
+    except LocalUiBridgeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+
+    if completed.get("status") != "completed":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "source": "local_ui_bridge",
+                "message": completed.get("error") or "Local helper job did not complete.",
+                "status": completed.get("status"),
+                "jobId": completed.get("jobId"),
+            },
+        )
+
+    return {
+        "decisionOwner": "custom_gpt",
+        "source": "stake_ui_state_via_local_helper",
+        "purpose": "stake_ui_diagnostics",
+        "bridge": _local_ui_bridge_summary(completed),
+        "state": completed.get("result") or {},
+    }
+
+
+@app.post("/mlb/stake-ui/clear-sgm-selections")
+async def mlb_stake_ui_clear_sgm_selections(
+    payload: dict[str, Any] = Body(default_factory=dict),
+    _: None = Depends(require_gpt_api_key),
+    job_store: SupabaseLocalUiJobStore = Depends(get_local_ui_job_store),
+) -> Any:
+    if not job_store.enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "source": "local_ui_bridge",
+                "message": (
+                    "Supabase local UI bridge is not configured. Set SUPABASE_URL "
+                    "and SUPABASE_SERVICE_ROLE_KEY on Render and the local helper."
+                ),
+            },
+        )
+
+    timeout_seconds = _clean_int_from_body(
+        payload,
+        "timeoutSeconds",
+        20,
+        minimum=1,
+        maximum=60,
+    )
+    fixture_slug = str(payload.get("fixtureSlug") or "").strip()
+    request = {
+        "requestedBy": "custom_gpt",
+        "purpose": "stake_ui_sgm_recovery_clear_selection",
+        "fixtureSlug": fixture_slug or None,
+    }
+    job: dict[str, Any] | None = None
+    try:
+        job = await job_store.create_job(
+            job_type=STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE,
+            request=request,
+            timeout_seconds=timeout_seconds,
+        )
+        completed = await job_store.wait_for_completed_result(
+            job["jobId"],
+            timeout_seconds=timeout_seconds,
+        )
+    except LocalUiBridgeDisabled as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+    except LocalUiBridgeTimeout as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "source": "local_ui_bridge",
+                "message": str(exc),
+                "jobId": (job or {}).get("jobId"),
+            },
+        ) from exc
+    except LocalUiBridgeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+
+    if completed.get("status") != "completed":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "source": "local_ui_bridge",
+                "message": completed.get("error") or "Local helper job did not complete.",
+                "status": completed.get("status"),
+                "jobId": completed.get("jobId"),
+            },
+        )
+
+    return {
+        "decisionOwner": "custom_gpt",
+        "source": "stake_ui_sgm_clear_selections_via_local_helper",
+        "purpose": "stake_ui_recovery",
+        "bridge": _local_ui_bridge_summary(completed),
+        "result": completed.get("result") or {},
     }
 
 
@@ -1397,6 +1563,17 @@ def _compact_review_slip_result(result: dict[str, Any]) -> dict[str, Any]:
             "clickedPlaceBet": False,
             **(result.get("safety") or {}),
         },
+    }
+
+
+def _local_ui_bridge_summary(completed: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "jobId": completed.get("jobId"),
+        "status": completed.get("status"),
+        "workerId": completed.get("workerId"),
+        "createdAt": completed.get("createdAt"),
+        "completedAt": completed.get("completedAt"),
+        "updatedAt": completed.get("updatedAt"),
     }
 
 

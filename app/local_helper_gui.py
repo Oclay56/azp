@@ -15,6 +15,12 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 WPARAM = ctypes.c_size_t
 LPARAM = ctypes.c_ssize_t
 LRESULT = ctypes.c_ssize_t
+HELPER_BG = "#03041D"
+HELPER_FG = "#F4F0FF"
+HELPER_MUTED_FG = "#C9C7D9"
+HELPER_PANEL_BG = "#070923"
+HELPER_BUTTON_BG = "#11143A"
+HELPER_BUTTON_ACTIVE_BG = "#1A1E55"
 
 
 def should_minimize_to_tray(window_state: str, *, tray_supported: bool) -> bool:
@@ -243,6 +249,7 @@ class AzpHelperGui:
         self.root.title("AZP Local Helper")
         self.root.geometry("720x440")
         self.root.minsize(620, 360)
+        self.root.configure(bg=HELPER_BG)
         self.process: subprocess.Popen[str] | None = None
         self.output_queue: queue.Queue[str] = queue.Queue()
         self._closing = False
@@ -257,6 +264,8 @@ class AzpHelperGui:
             self.root,
             text="AZP Local Helper",
             font=("Segoe UI", 16, "bold"),
+            bg=HELPER_BG,
+            fg=HELPER_FG,
         ).pack(pady=(14, 4))
         Label(
             self.root,
@@ -266,9 +275,11 @@ class AzpHelperGui:
             ),
             font=("Segoe UI", 10),
             wraplength=660,
+            bg=HELPER_BG,
+            fg=HELPER_MUTED_FG,
         ).pack(pady=(0, 12))
 
-        controls = Frame(self.root)
+        controls = Frame(self.root, bg=HELPER_BG)
         controls.pack(fill="x", padx=16, pady=(0, 10))
 
         Button(
@@ -276,18 +287,21 @@ class AzpHelperGui:
             text="Start Review Mode",
             command=lambda: self.start_helper("review"),
             width=22,
+            **_button_style(),
         ).pack(side=LEFT, padx=(0, 8))
         Button(
             controls,
             text="Start Build Slip Mode",
             command=lambda: self.start_helper("build"),
             width=22,
+            **_button_style(),
         ).pack(side=LEFT, padx=(0, 8))
         Button(
             controls,
             text="Stop Helper",
             command=self.stop_helper,
             width=16,
+            **_button_style(),
         ).pack(side=RIGHT)
 
         self.status_label = Label(
@@ -295,10 +309,27 @@ class AzpHelperGui:
             text="Status: idle",
             anchor="w",
             font=("Segoe UI", 10, "bold"),
+            bg=HELPER_BG,
+            fg=HELPER_FG,
         )
         self.status_label.pack(fill="x", padx=16)
 
-        self.log = Text(self.root, height=16, wrap="word", font=("Consolas", 10))
+        self.log = Text(
+            self.root,
+            height=16,
+            wrap="word",
+            font=("Consolas", 10),
+            bg=HELPER_PANEL_BG,
+            fg=HELPER_FG,
+            insertbackground=HELPER_FG,
+            selectbackground=HELPER_BUTTON_ACTIVE_BG,
+            selectforeground=HELPER_FG,
+            relief="flat",
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=HELPER_BUTTON_BG,
+            highlightcolor=HELPER_BUTTON_ACTIVE_BG,
+        )
         self.log.pack(fill=BOTH, expand=True, padx=16, pady=(8, 16))
         self._write_log("Pick a mode. Close this window when you are done.\n")
         self._write_log("Build Mode never enters a stake amount and never clicks Place Bet.\n\n")
@@ -430,6 +461,18 @@ class AzpHelperGui:
     def _write_log(self, text: str) -> None:
         self.log.insert(END, text)
         self.log.see(END)
+
+
+def _button_style() -> dict[str, str | int]:
+    return {
+        "bg": HELPER_BUTTON_BG,
+        "fg": HELPER_FG,
+        "activebackground": HELPER_BUTTON_ACTIVE_BG,
+        "activeforeground": HELPER_FG,
+        "relief": "flat",
+        "borderwidth": 0,
+        "highlightthickness": 0,
+    }
 
 
 def main() -> int:

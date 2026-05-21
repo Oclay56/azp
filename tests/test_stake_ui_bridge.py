@@ -235,6 +235,71 @@ class FakeCompletedBatchBuildJobStore(FakeCompletedUiJobStore):
         }
 
 
+class FakeCompletedStateJobStore(FakeCompletedUiJobStore):
+    async def wait_for_completed_result(
+        self,
+        job_id: str,
+        *,
+        timeout_seconds: int,
+        poll_interval_seconds: float = 1.0,
+    ):
+        assert job_id == "job-123"
+        return {
+            "jobId": job_id,
+            "status": "completed",
+            "workerId": "azp-local-test",
+            "result": {
+                "source": "stake_ui_state",
+                "capturedAt": "2026-05-20T20:00:00Z",
+                "status": "ok",
+                "url": "https://stake.com/sports/baseball/usa/mlb/46575351-new-york-yankees-toronto-blue-jays",
+                "currentFixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                "sgmVisible": True,
+                "access": {
+                    "regionBlocked": False,
+                    "cloudflareRequired": False,
+                    "loginRequired": False,
+                },
+                "slip": {
+                    "rightPanelFound": True,
+                    "rightPanelEmpty": False,
+                    "rightPanelSelectionCount": 2,
+                },
+                "warnings": [],
+            },
+            "error": None,
+        }
+
+
+class FakeCompletedClearSelectionsJobStore(FakeCompletedUiJobStore):
+    async def wait_for_completed_result(
+        self,
+        job_id: str,
+        *,
+        timeout_seconds: int,
+        poll_interval_seconds: float = 1.0,
+    ):
+        assert job_id == "job-123"
+        return {
+            "jobId": job_id,
+            "status": "completed",
+            "workerId": "azp-local-test",
+            "result": {
+                "source": "stake_ui_sgm_clear_selections",
+                "status": "cleared",
+                "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                "sgmVisible": True,
+                "clearedWorkingSelection": True,
+                "slip": {
+                    "rightPanelFound": True,
+                    "rightPanelEmpty": False,
+                    "rightPanelSelectionCount": 2,
+                },
+            },
+            "error": None,
+        }
+
+
 @pytest.fixture
 def fake_ui_store():
     return FakeCompletedUiJobStore()
@@ -293,6 +358,16 @@ def test_gpt_schema_exposes_batch_review_slip_action():
     group_schema = properties["groups"]["items"]
     assert "rowIds" in group_schema["properties"]
     assert "rowId" in group_schema["properties"]["selections"]["items"]["properties"]
+
+
+def test_gpt_schema_exposes_optional_stake_ui_state_actions():
+    schema = build_gpt_action_openapi_schema("https://azp-test.example")
+
+    state_operation = schema["paths"]["/mlb/stake-ui/state"]["post"]
+    clear_operation = schema["paths"]["/mlb/stake-ui/clear-sgm-selections"]["post"]
+
+    assert state_operation["operationId"] == "readStakeUiState"
+    assert clear_operation["operationId"] == "clearStakeUiSgmSelections"
 
 
 def test_compact_sgm_board_returns_stable_row_ids_for_duplicate_odds():
@@ -460,6 +535,53 @@ def test_stake_ui_review_slip_batch_route_accepts_row_ids_without_reconstructed_
         {"rowId": "sgm_abc123"},
         {"rowId": "sgm_def456"},
     ]
+
+
+def test_stake_ui_state_route_creates_diagnostic_job():
+    fake_store = FakeCompletedStateJobStore()
+    app.dependency_overrides[get_local_ui_job_store] = lambda: fake_store
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/mlb/stake-ui/state",
+            json={
+                "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                "timeoutSeconds": 2,
+            },
+        )
+
+    body = response.json()
+    created_request = fake_store.created_jobs[0]["request"]
+
+    assert response.status_code == 200
+    assert body["source"] == "stake_ui_state_via_local_helper"
+    assert body["purpose"] == "stake_ui_diagnostics"
+    assert body["state"]["currentFixtureSlug"] == "46575351-new-york-yankees-toronto-blue-jays"
+    assert body["state"]["sgmVisible"] is True
+    assert created_request["purpose"] == "stake_ui_diagnostics"
+
+
+def test_stake_ui_clear_sgm_selections_route_creates_recovery_job():
+    fake_store = FakeCompletedClearSelectionsJobStore()
+    app.dependency_overrides[get_local_ui_job_store] = lambda: fake_store
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/mlb/stake-ui/clear-sgm-selections",
+            json={
+                "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                "timeoutSeconds": 2,
+            },
+        )
+
+    body = response.json()
+    created_request = fake_store.created_jobs[0]["request"]
+
+    assert response.status_code == 200
+    assert body["source"] == "stake_ui_sgm_clear_selections_via_local_helper"
+    assert body["result"]["status"] == "cleared"
+    assert body["result"]["clearedWorkingSelection"] is True
+    assert created_request["purpose"] == "stake_ui_sgm_recovery_clear_selection"
 
 
 def test_stake_ui_sgm_board_route_creates_job_and_returns_completed_result(fake_ui_store):

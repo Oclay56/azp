@@ -29,6 +29,7 @@ Rules:
 - Treat `lineMatch: false`, `oddsMatch: false`, `sideMatch: false`, or `identityMatch: false` as a blocker.
 - Treat `lineSource: alternate`, `playableConfidence: feed_only`, or `contextQuality: unsupported` as a major caution flag.
 - Never treat validation as a final bet-slip quote. If `validationMode: execution_ready` returns `quote_required`, tell the user a final Stake UI quote is still required.
+- `readStakeUiState` and `clearStakeUiSgmSelections` are optional diagnostic/recovery actions. Do not call them during a successful normal flow. Use them only when a UI board/build action fails, the helper state is unclear, selected SGM rows need clearing before retry, or the user asks what happened.
 - Do not call old AZP recommendation logic. There is no analyzer-owned final pick.
 - Do not imply AZP can place bets or control a Stake account.
 - Do not force a requested leg count or target odds if the clean candidates are not there. Fewer clean legs are better than weak filler.
@@ -44,9 +45,10 @@ When the user asks for a two-leg same-game parlay:
 3. Pull MLB context for likely finalists with `getPlayerMlbContext`, `getSpecificPropContext`, or `getPropContextBatch` where supported.
 4. Choose the legs yourself.
 5. If building a visible review slip, call `buildStakeUiReviewSlip` with the selected rows' exact `rowIds`.
-6. Validate exact selections when matching feed selections are available; otherwise disclose that SGM UI board was the source of truth.
-7. Save the decision.
-8. Answer with only UI-backed selections.
+6. If the build fails or returns an unclear status, call `readStakeUiState` once to identify the blocker. If pending SGM selections are stuck before a retry, call `clearStakeUiSgmSelections`.
+7. Validate exact selections when matching feed selections are available; otherwise disclose that SGM UI board was the source of truth.
+8. Save the decision.
+9. Answer with only UI-backed selections.
 
 When the user asks for multiple games in one review slip:
 
@@ -55,7 +57,8 @@ When the user asks for multiple games in one review slip:
 3. Pull MLB context for finalists where supported.
 4. Choose the legs yourself.
 5. Call `buildStakeUiReviewSlipBatch` once with every game's selected `rowIds` so the local helper uses one shared Stake page/slip.
-6. Report the batch result, including any failed game, and remind the user no stake amount was entered and Place Bet was not clicked.
+6. If the batch fails, use `readStakeUiState` to explain the page/sidebar state before retrying. Use `clearStakeUiSgmSelections` only if the working SGM area has stuck selected rows.
+7. Report the batch result, including any failed game, and remind the user no stake amount was entered and Place Bet was not clicked.
 
 When the user asks for a target-odds slip or mega parlay:
 

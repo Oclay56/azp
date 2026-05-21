@@ -177,6 +177,53 @@ def read_stake_mlb_games(
         }
 
 
+def read_stake_ui_state(
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+    fixture_slug: str | None = None,
+) -> dict[str, Any]:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        if not browser.contexts:
+            raise RuntimeError("No Chrome context found on the debug port.")
+
+        page = _diagnostic_page(browser.contexts[0], fixture_slug=fixture_slug)
+        return _read_stake_ui_state_from_page(page)
+
+
+def clear_stake_sgm_selections(
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+    fixture_slug: str | None = None,
+) -> dict[str, Any]:
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        if not browser.contexts:
+            raise RuntimeError("No Chrome context found on the debug port.")
+
+        page = _diagnostic_page(browser.contexts[0], fixture_slug=fixture_slug)
+        state_before = _read_stake_ui_state_from_page(page)
+        if fixture_slug:
+            _open_same_game_multi_tab(page)
+        _clear_sgm_working_selection(page)
+        state_after = _read_stake_ui_state_from_page(page)
+        return {
+            "source": "stake_ui_sgm_clear_selections",
+            "capturedAt": datetime.now(timezone.utc).isoformat(),
+            "status": "cleared",
+            "fixtureSlug": fixture_slug or state_after.get("currentFixtureSlug"),
+            "sgmVisible": bool(state_after.get("sgmVisible")),
+            "clearedWorkingSelection": True,
+            "stateBefore": state_before,
+            "stateAfter": state_after,
+            "slip": state_after.get("slip") or {},
+        }
+
+
 def build_stake_sgm_review_slip(
     fixture_slug: str,
     selections: list[dict[str, Any]],
@@ -1498,6 +1545,91 @@ def _find_or_open_mlb_page(context: Any) -> Any:
     page = _shared_stake_page(context)
     page.goto(STAKE_MLB_URL, wait_until="domcontentloaded", timeout=45_000)
     return page
+
+
+def _diagnostic_page(context: Any, *, fixture_slug: str | None = None) -> Any:
+    if fixture_slug:
+        return _find_or_open_fixture_page(context, fixture_slug)
+    return _shared_stake_page(context)
+
+
+def _read_stake_ui_state_from_page(page: Any) -> dict[str, Any]:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
+    warnings: list[str] = []
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=8_000)
+    except PlaywrightTimeoutError:
+        warnings.append("page did not reach domcontentloaded before diagnostics")
+
+    body = ""
+    try:
+        body = page.locator("body").inner_text(timeout=5_000)
+    except Exception:
+        warnings.append("could not read Stake page body text")
+
+    normalized_body = str(body or "").lower()
+    url = str(page.url or "")
+    current_fixture_slug = _fixture_slug_from_url(url)
+    is_stake_page = "stake.com" in url
+    is_mlb_fixture_page = bool(current_fixture_slug)
+    sgm_visible = _has_same_game_multi_tab(body)
+    region_blocked = _is_region_blocked_body(body) or _restricted_region_url(url)
+    cloudflare_required = (
+        "performing security verification" in normalized_body
+        or "protect against malicious bots" in normalized_body
+        or ("cloudflare" in normalized_body and "verification" in normalized_body)
+    )
+    login_required = (
+        "login" in normalized_body
+        and "register" in normalized_body
+        and "wallet" not in normalized_body
+    ) or ("einloggen" in normalized_body and "registrieren" in normalized_body)
+
+    failure_reasons: list[str] = []
+    if not is_stake_page:
+        failure_reasons.append("not_stake_page")
+    if region_blocked:
+        failure_reasons.append("region_blocked")
+    if cloudflare_required:
+        failure_reasons.append("cloudflare_required")
+    if login_required:
+        failure_reasons.append("login_required")
+    if is_mlb_fixture_page and not sgm_visible:
+        failure_reasons.append("sgm_tab_missing")
+
+    slip = _read_bet_slip_state(page)
+    if not slip.get("rightPanelFound"):
+        failure_reasons.append("right_panel_missing")
+
+    status = "ok" if not failure_reasons else "attention_required"
+    matchup = _fixture_matchup_from_slug(current_fixture_slug) if current_fixture_slug else {}
+    return {
+        "source": "stake_ui_state",
+        "capturedAt": datetime.now(timezone.utc).isoformat(),
+        "status": status,
+        "url": url,
+        "currentFixtureSlug": current_fixture_slug,
+        "matchup": matchup.get("matchup"),
+        "teams": matchup.get("teams") or [],
+        "isStakePage": is_stake_page,
+        "isMlbFixturePage": is_mlb_fixture_page,
+        "sgmVisible": sgm_visible,
+        "access": {
+            "regionBlocked": region_blocked,
+            "cloudflareRequired": cloudflare_required,
+            "loginRequired": login_required,
+        },
+        "failureReasons": failure_reasons,
+        "slip": slip,
+        "warnings": warnings,
+    }
+
+
+def _fixture_slug_from_url(url: str) -> str | None:
+    path = urlparse(str(url or "")).path.strip("/")
+    match = re.search(r"(?:^|/)sports/baseball/usa/mlb/(\d+[a-z0-9-]*)$", path)
+    return match.group(1) if match else None
 
 
 def _check_stake_page_access(page: Any) -> list[str]:

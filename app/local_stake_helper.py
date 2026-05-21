@@ -11,17 +11,21 @@ from typing import Any
 
 from .local_ui_bridge import (
     STAKE_MLB_GAMES_JOB_TYPE,
+    STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE,
     STAKE_SGM_BOARD_JOB_TYPE,
     STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE,
     STAKE_SGM_BUILD_SLIP_JOB_TYPE,
+    STAKE_UI_STATE_JOB_TYPE,
     SupabaseLocalUiJobStore,
 )
 from .stake_sgm_browser import (
     DEFAULT_CDP_URL,
     build_stake_sgm_review_slip_batch,
     build_stake_sgm_review_slip,
+    clear_stake_sgm_selections,
     read_stake_mlb_games,
     read_stake_sgm_board,
+    read_stake_ui_state,
 )
 
 
@@ -87,7 +91,13 @@ async def process_job(
     job_type = str(job.get("jobType") or "")
     request = job.get("request") or {}
     fixture_slug = str(request.get("fixtureSlug") or "").strip()
-    if job_type not in {STAKE_MLB_GAMES_JOB_TYPE, STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE} and not fixture_slug:
+    fixture_optional_types = {
+        STAKE_MLB_GAMES_JOB_TYPE,
+        STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE,
+        STAKE_UI_STATE_JOB_TYPE,
+        STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE,
+    }
+    if job_type not in fixture_optional_types and not fixture_slug:
         await store.fail_job(job_id, "Job request is missing fixtureSlug.")
         return
 
@@ -100,6 +110,18 @@ async def process_job(
                 read_stake_mlb_games,
                 cdp_url=cdp_url,
                 limit=int(request.get("limit") or 50),
+            )
+        elif job_type == STAKE_UI_STATE_JOB_TYPE:
+            result = await asyncio.to_thread(
+                read_stake_ui_state,
+                cdp_url=cdp_url,
+                fixture_slug=fixture_slug or None,
+            )
+        elif job_type == STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE:
+            result = await asyncio.to_thread(
+                clear_stake_sgm_selections,
+                cdp_url=cdp_url,
+                fixture_slug=fixture_slug or None,
             )
         elif job_type == STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE:
             result = await asyncio.to_thread(
@@ -221,23 +243,31 @@ def _job_types_for_mode(mode: str) -> list[str]:
     if normalized == "build":
         return [
             STAKE_MLB_GAMES_JOB_TYPE,
+            STAKE_UI_STATE_JOB_TYPE,
             STAKE_SGM_BOARD_JOB_TYPE,
+            STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE,
             STAKE_SGM_BUILD_SLIP_JOB_TYPE,
             STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE,
         ]
     if normalized == "all":
         return [
             STAKE_MLB_GAMES_JOB_TYPE,
+            STAKE_UI_STATE_JOB_TYPE,
             STAKE_SGM_BOARD_JOB_TYPE,
+            STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE,
             STAKE_SGM_BUILD_SLIP_JOB_TYPE,
             STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE,
         ]
-    return [STAKE_MLB_GAMES_JOB_TYPE, STAKE_SGM_BOARD_JOB_TYPE]
+    return [STAKE_MLB_GAMES_JOB_TYPE, STAKE_UI_STATE_JOB_TYPE, STAKE_SGM_BOARD_JOB_TYPE]
 
 
 def _job_label(job_type: str) -> str:
     if job_type == STAKE_MLB_GAMES_JOB_TYPE:
         return "Reading Stake MLB games"
+    if job_type == STAKE_UI_STATE_JOB_TYPE:
+        return "Reading Stake UI state"
+    if job_type == STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE:
+        return "Clearing SGM selections"
     if job_type == STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE:
         return "Building batch review slip"
     if job_type == STAKE_SGM_BUILD_SLIP_JOB_TYPE:

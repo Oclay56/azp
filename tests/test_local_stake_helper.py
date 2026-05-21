@@ -145,6 +145,77 @@ def test_process_job_runs_batch_review_builder(monkeypatch):
     assert store.completed[0][1]["status"] == "built_for_review"
 
 
+def test_process_job_runs_stake_ui_state_reader(monkeypatch):
+    def fake_read_stake_ui_state(*, cdp_url: str, fixture_slug: str | None = None):
+        assert cdp_url == "http://127.0.0.1:9222"
+        assert fixture_slug == "46575351-new-york-yankees-toronto-blue-jays"
+        return {
+            "source": "stake_ui_state",
+            "status": "ok",
+            "currentFixtureSlug": fixture_slug,
+            "sgmVisible": True,
+        }
+
+    monkeypatch.setattr(
+        local_stake_helper,
+        "read_stake_ui_state",
+        fake_read_stake_ui_state,
+    )
+    store = FakeJobStore()
+    job = {
+        "jobId": "job-state",
+        "jobType": "stake_ui_state",
+        "request": {"fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays"},
+    }
+
+    asyncio.run(
+        local_stake_helper.process_job(
+            store,
+            job,
+            cdp_url="http://127.0.0.1:9222",
+        )
+    )
+
+    assert not store.failed
+    assert store.completed[0][0] == "job-state"
+    assert store.completed[0][1]["source"] == "stake_ui_state"
+
+
+def test_process_job_runs_sgm_selection_clearer(monkeypatch):
+    def fake_clear_stake_sgm_selections(*, cdp_url: str, fixture_slug: str | None = None):
+        assert cdp_url == "http://127.0.0.1:9222"
+        assert fixture_slug == "46575351-new-york-yankees-toronto-blue-jays"
+        return {
+            "source": "stake_ui_sgm_clear_selections",
+            "status": "cleared",
+            "fixtureSlug": fixture_slug,
+        }
+
+    monkeypatch.setattr(
+        local_stake_helper,
+        "clear_stake_sgm_selections",
+        fake_clear_stake_sgm_selections,
+    )
+    store = FakeJobStore()
+    job = {
+        "jobId": "job-clear",
+        "jobType": "stake_ui_sgm_clear_selections",
+        "request": {"fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays"},
+    }
+
+    asyncio.run(
+        local_stake_helper.process_job(
+            store,
+            job,
+            cdp_url="http://127.0.0.1:9222",
+        )
+    )
+
+    assert not store.failed
+    assert store.completed[0][0] == "job-clear"
+    assert store.completed[0][1]["status"] == "cleared"
+
+
 def test_process_job_does_not_crash_when_failure_reporting_fails(monkeypatch, capsys):
     def fake_read_stake_sgm_board(fixture_slug: str, *, cdp_url: str):
         raise RuntimeError("Stake is still region-blocked in this browser session.")

@@ -195,6 +195,32 @@ def build_gpt_action_openapi_schema(server_url: str) -> dict[str, Any]:
                     request_body=_stake_ui_mlb_games_request_body(),
                 )
             },
+            "/mlb/stake-ui/state": {
+                "post": _operation(
+                    "readStakeUiState",
+                    "Read Stake UI helper state",
+                    (
+                        "Optional diagnostic action. Use only when the SGM board/build "
+                        "flow fails, looks stale, or the user asks what happened. It "
+                        "reports the current Stake page, fixture, SGM visibility, "
+                        "login/region/Cloudflare state, and sidebar state."
+                    ),
+                    request_body=_stake_ui_state_request_body(),
+                )
+            },
+            "/mlb/stake-ui/clear-sgm-selections": {
+                "post": _operation(
+                    "clearStakeUiSgmSelections",
+                    "Clear pending SGM selections",
+                    (
+                        "Optional recovery action. Use only after a failed or partial "
+                        "SGM build when selected SGM rows need to be cleared before a "
+                        "retry. It does not clear the visible sidebar slip and never "
+                        "places a bet."
+                    ),
+                    request_body=_stake_ui_clear_sgm_selections_request_body(),
+                )
+            },
             "/mlb/stake-ui/review-slip": {
                 "post": _operation(
                     "buildStakeUiReviewSlip",
@@ -2523,6 +2549,54 @@ def _stake_ui_mlb_games_request_body() -> dict[str, Any]:
                             "description": "Maximum visible Stake MLB games to return.",
                         },
                         "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 90},
+                    },
+                    "additionalProperties": True,
+                }
+            }
+        },
+    }
+
+
+def _stake_ui_state_request_body() -> dict[str, Any]:
+    return {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "fixtureSlug": {
+                            "type": "string",
+                            "description": (
+                                "Optional Stake fixture slug. If omitted, the helper reads "
+                                "whichever Stake tab/page is currently active in the helper browser."
+                            ),
+                        },
+                        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
+                    },
+                    "additionalProperties": True,
+                }
+            }
+        },
+    }
+
+
+def _stake_ui_clear_sgm_selections_request_body() -> dict[str, Any]:
+    return {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "fixtureSlug": {
+                            "type": "string",
+                            "description": (
+                                "Optional Stake fixture slug. Provide it when clearing pending "
+                                "selections for a specific Same Game Multi page."
+                            ),
+                        },
+                        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
                     },
                     "additionalProperties": True,
                 }
