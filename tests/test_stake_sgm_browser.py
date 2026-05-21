@@ -11,6 +11,7 @@ from app.stake_sgm_browser import (
     _has_logged_out_warning,
     _market_display_aliases,
     _market_search_text,
+    _review_add_summary,
     fixture_url,
 )
 
@@ -179,3 +180,57 @@ def test_add_bet_confirmation_requires_sidebar_change_when_existing_slip_present
     assert not _add_bet_confirmed(before, unchanged_after)
     assert _add_bet_confirmed(before, changed_after)
     assert _add_bet_confirmed({"rightPanelEmpty": True}, changed_after)
+
+
+def test_review_add_summary_reports_sidebar_before_after_counts():
+    selected_rows = [
+        {"player": "Player One", "market": "Strikeouts", "side": "under", "line": 4.5},
+        {"team": "Pittsburgh Pirates", "market": "Team RBIs", "side": "under", "line": 3.5},
+    ]
+    click_results = [{"status": "clicked"}, {"status": "clicked"}]
+    add_bet_result = {
+        "status": "clicked",
+        "clickedBy": "playwright_locator",
+        "beforeClick": {
+            "rightPanelEmpty": False,
+            "rightPanelSelectionCount": 2,
+            "rightPanelTextLength": 120,
+        },
+        "postClick": {
+            "rightPanelEmpty": False,
+            "rightPanelSelectionCount": 4,
+            "rightPanelTextLength": 220,
+        },
+        "addBetConfirmed": True,
+    }
+
+    summary = _review_add_summary(
+        fixture_slug="465-test-fixture",
+        matchup="Cardinals vs Pirates",
+        selected_rows=selected_rows,
+        click_results=click_results,
+        add_bet_result=add_bet_result,
+    )
+
+    assert summary == {
+        "fixtureSlug": "465-test-fixture",
+        "matchup": "Cardinals vs Pirates",
+        "gameAdded": True,
+        "requestedLegs": 2,
+        "clickedLegs": 2,
+        "addBetClicked": True,
+        "addBetConfirmed": True,
+        "clickedBy": "playwright_locator",
+        "sidebarBefore": {
+            "empty": False,
+            "selectionCount": 2,
+            "textLength": 120,
+        },
+        "sidebarAfter": {
+            "empty": False,
+            "selectionCount": 4,
+            "textLength": 220,
+        },
+        "sidebarSelectionDelta": 2,
+        "sidebarChanged": True,
+    }

@@ -1307,9 +1307,18 @@ def _review_slip_result(
     click_results: list[dict[str, Any]],
     add_bet_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    matchup = _fixture_matchup_from_slug(fixture_slug).get("matchup")
+    add_summary = _review_add_summary(
+        fixture_slug=fixture_slug,
+        matchup=matchup,
+        selected_rows=selected_rows,
+        click_results=click_results,
+        add_bet_result=add_bet_result or {},
+    )
     return {
         "source": "stake_ui_sgm_build_slip",
         "fixtureSlug": fixture_slug,
+        "matchup": matchup,
         "capturedAt": datetime.now(timezone.utc).isoformat(),
         "status": status,
         "reviewOnly": True,
@@ -1318,12 +1327,60 @@ def _review_slip_result(
         "missingSelections": missing_selections,
         "clickResults": click_results,
         "addBetResult": add_bet_result or {},
+        "addSummary": add_summary,
         "warnings": board.get("warnings") or [],
         "safety": {
             "enteredStakeAmount": False,
             "clickedAddBet": bool((add_bet_result or {}).get("status") == "clicked"),
             "clickedPlaceBet": False,
         },
+    }
+
+
+def _review_add_summary(
+    *,
+    fixture_slug: str,
+    matchup: str | None,
+    selected_rows: list[dict[str, Any]],
+    click_results: list[dict[str, Any]],
+    add_bet_result: dict[str, Any],
+) -> dict[str, Any]:
+    before_state = dict(add_bet_result.get("beforeClick") or {})
+    after_state = dict(add_bet_result.get("postClick") or {})
+    before_count = _int_or_none(before_state.get("rightPanelSelectionCount"))
+    after_count = _int_or_none(after_state.get("rightPanelSelectionCount"))
+    sidebar_changed = _add_bet_confirmed(before_state, after_state)
+    add_bet_confirmed = bool(
+        add_bet_result.get("addBetConfirmed")
+        if "addBetConfirmed" in add_bet_result
+        else sidebar_changed
+    )
+
+    return {
+        "fixtureSlug": fixture_slug,
+        "matchup": matchup,
+        "gameAdded": bool(add_bet_result.get("status") == "clicked" and add_bet_confirmed),
+        "requestedLegs": len(selected_rows),
+        "clickedLegs": sum(1 for row in click_results if row.get("status") == "clicked"),
+        "addBetClicked": bool(add_bet_result.get("status") == "clicked"),
+        "addBetConfirmed": add_bet_confirmed,
+        "clickedBy": add_bet_result.get("clickedBy") or add_bet_result.get("clickedText"),
+        "sidebarBefore": _compact_sidebar_state(before_state),
+        "sidebarAfter": _compact_sidebar_state(after_state),
+        "sidebarSelectionDelta": (
+            after_count - before_count
+            if before_count is not None and after_count is not None
+            else None
+        ),
+        "sidebarChanged": sidebar_changed,
+    }
+
+
+def _compact_sidebar_state(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "empty": bool(state.get("rightPanelEmpty", True)),
+        "selectionCount": _int_or_none(state.get("rightPanelSelectionCount")),
+        "textLength": _int_or_none(state.get("rightPanelTextLength")),
     }
 
 
