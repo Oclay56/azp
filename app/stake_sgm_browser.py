@@ -224,6 +224,51 @@ def clear_stake_sgm_selections(
         }
 
 
+def remove_stake_sidebar_group(
+    *,
+    cdp_url: str = DEFAULT_CDP_URL,
+    fixture_slug: str | None = None,
+    matchup: str | None = None,
+) -> dict[str, Any]:
+    if not fixture_slug and not matchup:
+        raise RuntimeError("fixtureSlug or matchup is required to remove a sidebar group.")
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.connect_over_cdp(cdp_url)
+        if not browser.contexts:
+            raise RuntimeError("No Chrome context found on the debug port.")
+
+        page = _diagnostic_page(browser.contexts[0], fixture_slug=fixture_slug)
+        state_before = _read_stake_ui_state_from_page(page)
+        target = _sidebar_group_target(fixture_slug=fixture_slug, matchup=matchup)
+        remove_result = _remove_sidebar_group_from_page(page, target)
+        state_after = _read_stake_ui_state_from_page(page)
+        removed = _sidebar_remove_confirmed(
+            remove_result=remove_result,
+            before_state=state_before.get("slip") or {},
+            after_state=state_after.get("slip") or {},
+        )
+        return {
+            "source": "stake_ui_remove_sidebar_group",
+            "capturedAt": datetime.now(timezone.utc).isoformat(),
+            "status": "removed" if removed else "not_removed",
+            "fixtureSlug": fixture_slug,
+            "matchup": target.get("matchup"),
+            "teams": target.get("teams") or [],
+            "removeResult": remove_result,
+            "stateBefore": state_before,
+            "stateAfter": state_after,
+            "slip": state_after.get("slip") or {},
+            "safety": {
+                "enteredStakeAmount": False,
+                "clickedPlaceBet": False,
+                "removedSidebarGroupOnly": True,
+            },
+        }
+
+
 def build_stake_sgm_review_slip(
     fixture_slug: str,
     selections: list[dict[str, Any]],
@@ -878,6 +923,235 @@ def _read_bet_slip_state(page: Any) -> dict[str, Any]:
         )
     except Exception:
         return {}
+
+
+def _sidebar_group_target(
+    *,
+    fixture_slug: str | None,
+    matchup: str | None,
+) -> dict[str, Any]:
+    fixture_matchup = _fixture_matchup_from_slug(fixture_slug) if fixture_slug else {}
+    target_matchup = str(matchup or fixture_matchup.get("matchup") or "").strip()
+    teams = list(fixture_matchup.get("teams") or [])
+    if target_matchup and len(teams) < 2:
+        parts = [
+            part.strip()
+            for part in re.split(
+                r"\s+(?:vs\.?|v\.?|versus)\s+|\s+-\s+",
+                target_matchup,
+                flags=re.IGNORECASE,
+            )
+            if part.strip()
+        ]
+        if len(parts) >= 2:
+            teams = [parts[0], parts[1]]
+    return {
+        "fixtureSlug": fixture_slug,
+        "matchup": target_matchup,
+        "teams": teams[:2],
+    }
+
+
+def _remove_sidebar_group_from_page(page: Any, target: dict[str, Any]) -> dict[str, Any]:
+    try:
+        result = page.evaluate(
+            """
+            async ({ fixtureSlug, matchup, teams }) => {
+              const norm = (value) => String(value || "")
+                .normalize("NFD")
+                .replace(/[\\u0300-\\u036f]/g, "")
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, " ")
+                .replace(/\\s+/g, " ")
+                .trim();
+              const visible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style.visibility !== "hidden"
+                  && style.display !== "none"
+                  && rect.width > 0
+                  && rect.height > 0;
+              };
+              const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+              const textDigest = (text) => {
+                let hash = 0;
+                for (let index = 0; index < text.length; index += 1) {
+                  hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+                }
+                return String(hash);
+              };
+              const rightPanel = document.querySelector("#right-sidebar") || Array.from(document.querySelectorAll("aside,[role='complementary'],body *"))
+                .filter(visible)
+                .find((el) => {
+                  const rect = el.getBoundingClientRect();
+                  const text = norm(el.innerText || el.textContent || "");
+                  return rect.width >= 220
+                    && rect.x > window.innerWidth * 0.55
+                    && (text.includes("bet slip") || text.includes("betting slip") || text.includes("wettschein"));
+                });
+              if (!rightPanel) {
+                return { status: "not_removed", reason: "right_panel_missing" };
+              }
+
+              const aliasesForTeam = (team) => {
+                const value = norm(team);
+                if (!value) return [];
+                const parts = value.split(" ").filter(Boolean);
+                const aliases = [value];
+                if (value.startsWith("new york ") && parts.length > 2) {
+                  aliases.push(`ny ${parts.slice(2).join(" ")}`);
+                }
+                if (parts.length >= 2) {
+                  aliases.push(parts.slice(-2).join(" "));
+                }
+                if (parts.length >= 1) {
+                  aliases.push(parts[parts.length - 1]);
+                }
+                return Array.from(new Set(aliases.filter((item) => item.length >= 3)));
+              };
+              const teamAliases = Array.isArray(teams)
+                ? teams.map(aliasesForTeam).filter((aliases) => aliases.length)
+                : [];
+              const targetText = norm(matchup);
+              const matchesTarget = (text) => {
+                const value = norm(text);
+                if (teamAliases.length >= 2) {
+                  return teamAliases.every((aliases) => aliases.some((alias) => value.includes(alias)));
+                }
+                return targetText.length >= 6 && value.includes(targetText.replace(/\\bvs\\b/g, " "));
+              };
+              const nearestClickable = (el) => {
+                let current = el;
+                for (let depth = 0; depth < 4 && current; depth += 1) {
+                  const tag = String(current.tagName || "").toLowerCase();
+                  const role = current.getAttribute("role") || "";
+                  if (tag === "button" || role === "button") {
+                    return current;
+                  }
+                  current = current.parentElement;
+                }
+                return el;
+              };
+              const removeButtonFor = (container) => {
+                const crect = container.getBoundingClientRect();
+                const raw = Array.from(container.querySelectorAll("button,[role='button'],[aria-label],svg"))
+                  .map(nearestClickable)
+                  .filter((el, index, items) => items.indexOf(el) === index)
+                  .filter(visible)
+                  .map((el) => {
+                    const rect = el.getBoundingClientRect();
+                    const text = norm(`${el.getAttribute("aria-label") || ""} ${el.getAttribute("title") || ""} ${el.innerText || el.textContent || ""}`);
+                    const looksRemove = text === "x"
+                      || text === "close"
+                      || text.includes("remove")
+                      || text.includes("delete")
+                      || text.includes("clear")
+                      || text.includes("close");
+                    const topRightScore =
+                      ((rect.x - crect.x) / Math.max(crect.width, 1)) * 100
+                      - ((rect.y - crect.y) / Math.max(crect.height, 1)) * 25;
+                    return { el, text, looksRemove, rect, topRightScore };
+                  })
+                  .filter((item) => item.looksRemove || item.rect.x > crect.x + crect.width * 0.65);
+                raw.sort((a, b) => b.topRightScore - a.topRightScore);
+                return raw[0] || null;
+              };
+
+              const panelTextBefore = norm(rightPanel.innerText || rightPanel.textContent || "");
+              const starts = Array.from(rightPanel.querySelectorAll("*"))
+                .filter(visible)
+                .filter((el) => matchesTarget(el.innerText || el.textContent || ""));
+              const candidates = [];
+              for (const start of starts) {
+                let current = start;
+                for (let depth = 0; depth < 8 && current && current !== rightPanel.parentElement; depth += 1) {
+                  if (!visible(current) || !matchesTarget(current.innerText || current.textContent || "")) {
+                    current = current.parentElement;
+                    continue;
+                  }
+                  const rect = current.getBoundingClientRect();
+                  if (current === rightPanel || rect.height > rightPanel.getBoundingClientRect().height * 0.9) {
+                    current = current.parentElement;
+                    continue;
+                  }
+                  const remove = removeButtonFor(current);
+                  if (remove) {
+                    candidates.push({
+                      container: current,
+                      button: remove.el,
+                      buttonText: remove.text,
+                      area: rect.width * rect.height,
+                      textLength: String(current.innerText || current.textContent || "").length,
+                      sample: String(current.innerText || current.textContent || "").trim().replace(/\\s+/g, " ").slice(0, 220),
+                      rect: {
+                        x: Math.round(rect.x),
+                        y: Math.round(rect.y),
+                        width: Math.round(rect.width),
+                        height: Math.round(rect.height),
+                      },
+                    });
+                  }
+                  current = current.parentElement;
+                }
+              }
+              candidates.sort((a, b) => (a.area - b.area) || (a.textLength - b.textLength));
+              if (!candidates.length) {
+                return {
+                  status: "not_removed",
+                  reason: "sidebar_group_not_found",
+                  target: { fixtureSlug, matchup, teams },
+                  targetMatchedInPanel: matchesTarget(panelTextBefore),
+                  rightPanelTextDigest: textDigest(panelTextBefore),
+                  rightPanelTextSample: panelTextBefore.slice(0, 260),
+                };
+              }
+
+              const selected = candidates[0];
+              selected.button.scrollIntoView({ block: "center", inline: "center" });
+              selected.button.click();
+              await sleep(800);
+              const panelTextAfter = norm(rightPanel.innerText || rightPanel.textContent || "");
+              return {
+                status: "clicked",
+                target: { fixtureSlug, matchup, teams },
+                candidateCount: candidates.length,
+                clickedButtonText: selected.buttonText,
+                clickedGroupSample: selected.sample,
+                clickedGroupRect: selected.rect,
+                targetStillVisible: matchesTarget(panelTextAfter),
+                sidebarDigestBefore: textDigest(panelTextBefore),
+                sidebarDigestAfter: textDigest(panelTextAfter),
+              };
+            }
+            """,
+            target,
+        )
+        page.wait_for_timeout(300)
+        return dict(result or {})
+    except Exception as exc:
+        return {"status": "not_removed", "reason": str(exc)}
+
+
+def _sidebar_remove_confirmed(
+    *,
+    remove_result: dict[str, Any],
+    before_state: dict[str, Any],
+    after_state: dict[str, Any],
+) -> bool:
+    if remove_result.get("status") != "clicked":
+        return False
+    if remove_result.get("targetStillVisible") is False:
+        return True
+
+    before_digest = str(before_state.get("rightPanelTextDigest") or "")
+    after_digest = str(after_state.get("rightPanelTextDigest") or "")
+    before_length = _int_or_none(before_state.get("rightPanelTextLength")) or 0
+    after_length = _int_or_none(after_state.get("rightPanelTextLength")) or 0
+    before_count = _int_or_none(before_state.get("rightPanelSelectionCount")) or 0
+    after_count = _int_or_none(after_state.get("rightPanelSelectionCount")) or 0
+    if before_count and after_count < before_count:
+        return True
+    return bool(before_digest and before_digest != after_digest and after_length + 10 < before_length)
 
 
 def _clear_sgm_working_selection(page: Any) -> None:

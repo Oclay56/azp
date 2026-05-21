@@ -300,6 +300,45 @@ class FakeCompletedClearSelectionsJobStore(FakeCompletedUiJobStore):
         }
 
 
+class FakeCompletedRemoveSidebarGroupJobStore(FakeCompletedUiJobStore):
+    async def wait_for_completed_result(
+        self,
+        job_id: str,
+        *,
+        timeout_seconds: int,
+        poll_interval_seconds: float = 1.0,
+    ):
+        assert job_id == "job-123"
+        return {
+            "jobId": job_id,
+            "status": "completed",
+            "workerId": "azp-local-test",
+            "result": {
+                "source": "stake_ui_remove_sidebar_group",
+                "capturedAt": "2026-05-20T20:00:00Z",
+                "status": "removed",
+                "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                "matchup": "New York Yankees vs Toronto Blue Jays",
+                "teams": ["New York Yankees", "Toronto Blue Jays"],
+                "removeResult": {
+                    "status": "clicked",
+                    "targetStillVisible": False,
+                },
+                "slip": {
+                    "rightPanelFound": True,
+                    "rightPanelEmpty": False,
+                    "rightPanelSelectionCount": 2,
+                },
+                "safety": {
+                    "enteredStakeAmount": False,
+                    "clickedPlaceBet": False,
+                    "removedSidebarGroupOnly": True,
+                },
+            },
+            "error": None,
+        }
+
+
 @pytest.fixture
 def fake_ui_store():
     return FakeCompletedUiJobStore()
@@ -365,9 +404,13 @@ def test_gpt_schema_exposes_optional_stake_ui_state_actions():
 
     state_operation = schema["paths"]["/mlb/stake-ui/state"]["post"]
     clear_operation = schema["paths"]["/mlb/stake-ui/clear-sgm-selections"]["post"]
+    remove_operation = schema["paths"]["/mlb/stake-ui/remove-sidebar-group"]["post"]
 
     assert state_operation["operationId"] == "readStakeUiState"
     assert clear_operation["operationId"] == "clearStakeUiSgmSelections"
+    assert remove_operation["operationId"] == "removeStakeUiSidebarGroup"
+    properties = remove_operation["requestBody"]["content"]["application/json"]["schema"]["properties"]
+    assert properties["reviewOnly"]["const"] is True
 
 
 def test_compact_sgm_board_returns_stable_row_ids_for_duplicate_odds():
@@ -582,6 +625,35 @@ def test_stake_ui_clear_sgm_selections_route_creates_recovery_job():
     assert body["result"]["status"] == "cleared"
     assert body["result"]["clearedWorkingSelection"] is True
     assert created_request["purpose"] == "stake_ui_sgm_recovery_clear_selection"
+
+
+def test_stake_ui_remove_sidebar_group_route_creates_safe_recovery_job():
+    fake_store = FakeCompletedRemoveSidebarGroupJobStore()
+    app.dependency_overrides[get_local_ui_job_store] = lambda: fake_store
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/mlb/stake-ui/remove-sidebar-group",
+            json={
+                "matchup": "Yankees vs Blue Jays",
+                "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+                "timeoutSeconds": 2,
+                "reviewOnly": True,
+            },
+        )
+
+    body = response.json()
+    created_request = fake_store.created_jobs[0]["request"]
+
+    assert response.status_code == 200
+    assert body["source"] == "stake_ui_remove_sidebar_group_via_local_helper"
+    assert body["purpose"] == "stake_ui_review_slip_sidebar_removal"
+    assert body["result"]["status"] == "removed"
+    assert body["result"]["safety"]["clickedPlaceBet"] is False
+    assert body["result"]["safety"]["removedSidebarGroupOnly"] is True
+    assert created_request["purpose"] == "stake_ui_remove_sidebar_group"
+    assert created_request["reviewOnly"] is True
+    assert created_request["forbiddenActions"] == ["enter_stake_amount", "click_place_bet"]
 
 
 def test_stake_ui_sgm_board_route_creates_job_and_returns_completed_result(fake_ui_store):

@@ -12,6 +12,8 @@ from app.stake_sgm_browser import (
     _market_display_aliases,
     _market_search_text,
     _review_add_summary,
+    _sidebar_group_target,
+    _sidebar_remove_confirmed,
     fixture_url,
 )
 
@@ -234,3 +236,45 @@ def test_review_add_summary_reports_sidebar_before_after_counts():
         "sidebarSelectionDelta": 2,
         "sidebarChanged": True,
     }
+
+
+def test_sidebar_group_target_uses_fixture_slug_matchup():
+    target = _sidebar_group_target(
+        fixture_slug="46575351-new-york-yankees-toronto-blue-jays",
+        matchup=None,
+    )
+
+    assert target == {
+        "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+        "matchup": "New York Yankees vs Toronto Blue Jays",
+        "teams": ["New York Yankees", "Toronto Blue Jays"],
+    }
+
+
+def test_sidebar_remove_confirmed_accepts_disappeared_target_or_sidebar_shrink():
+    before = {
+        "rightPanelTextDigest": "abc",
+        "rightPanelTextLength": 220,
+        "rightPanelSelectionCount": 4,
+    }
+    after = {
+        "rightPanelTextDigest": "def",
+        "rightPanelTextLength": 140,
+        "rightPanelSelectionCount": 2,
+    }
+
+    assert _sidebar_remove_confirmed(
+        remove_result={"status": "clicked", "targetStillVisible": False},
+        before_state=before,
+        after_state=before,
+    )
+    assert _sidebar_remove_confirmed(
+        remove_result={"status": "clicked", "targetStillVisible": True},
+        before_state=before,
+        after_state=after,
+    )
+    assert not _sidebar_remove_confirmed(
+        remove_result={"status": "not_removed"},
+        before_state=before,
+        after_state=after,
+    )

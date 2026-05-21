@@ -221,6 +221,19 @@ def build_gpt_action_openapi_schema(server_url: str) -> dict[str, Any]:
                     request_body=_stake_ui_clear_sgm_selections_request_body(),
                 )
             },
+            "/mlb/stake-ui/remove-sidebar-group": {
+                "post": _operation(
+                    "removeStakeUiSidebarGroup",
+                    "Remove Stake UI sidebar group",
+                    (
+                        "Optional recovery action. Removes one already-added right-sidebar "
+                        "SGM/game group by exact fixture or matchup. Use only when the user "
+                        "asks to delete one game from the visible review slip. It never "
+                        "clears the whole slip, enters stake amount, or clicks Place Bet."
+                    ),
+                    request_body=_stake_ui_remove_sidebar_group_request_body(),
+                )
+            },
             "/mlb/stake-ui/review-slip": {
                 "post": _operation(
                     "buildStakeUiReviewSlip",
@@ -2598,6 +2611,48 @@ def _stake_ui_clear_sgm_selections_request_body() -> dict[str, Any]:
                         },
                         "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
                     },
+                    "additionalProperties": True,
+                }
+            }
+        },
+    }
+
+
+def _stake_ui_remove_sidebar_group_request_body() -> dict[str, Any]:
+    return {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "fixtureSlug": {
+                            "type": "string",
+                            "description": (
+                                "Stake fixture slug for the game group already visible in the "
+                                "right sidebar. Preferred when known."
+                            ),
+                        },
+                        "matchup": {
+                            "type": "string",
+                            "description": (
+                                "Fallback matchup text, for example Cardinals vs Pirates. "
+                                "Used to resolve the fixture and match the sidebar group."
+                            ),
+                        },
+                        "date": {"type": "string", "format": "date"},
+                        "reviewOnly": {
+                            "type": "boolean",
+                            "const": True,
+                            "description": (
+                                "Must be true. The helper can remove one visible review-slip "
+                                "group, but cannot enter stake amount or place a bet."
+                            ),
+                        },
+                        "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
+                        "scheduleLimit": {"type": "integer", "minimum": 1, "maximum": 100},
+                    },
+                    "required": ["reviewOnly"],
                     "additionalProperties": True,
                 }
             }

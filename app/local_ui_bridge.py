@@ -15,6 +15,7 @@ STAKE_MLB_GAMES_JOB_TYPE = "stake_ui_mlb_games"
 STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE = "stake_ui_sgm_build_slip_batch"
 STAKE_UI_STATE_JOB_TYPE = "stake_ui_state"
 STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE = "stake_ui_sgm_clear_selections"
+STAKE_REMOVE_SIDEBAR_GROUP_JOB_TYPE = "stake_ui_remove_sidebar_group"
 
 # Backward-compatible name used by the first local helper implementation.
 STAKE_SGM_JOB_TYPE = STAKE_SGM_BOARD_JOB_TYPE

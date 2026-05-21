@@ -15,6 +15,7 @@ from .local_archive import (
 )
 from .local_ui_bridge import (
     STAKE_MLB_GAMES_JOB_TYPE,
+    STAKE_REMOVE_SIDEBAR_GROUP_JOB_TYPE,
     STAKE_SGM_CLEAR_SELECTIONS_JOB_TYPE,
     STAKE_SGM_BUILD_SLIP_JOB_TYPE,
     STAKE_SGM_BUILD_SLIP_BATCH_JOB_TYPE,
@@ -610,6 +611,126 @@ async def mlb_stake_ui_clear_sgm_selections(
         "purpose": "stake_ui_recovery",
         "bridge": _local_ui_bridge_summary(completed),
         "result": completed.get("result") or {},
+    }
+
+
+@app.post("/mlb/stake-ui/remove-sidebar-group")
+async def mlb_stake_ui_remove_sidebar_group(
+    payload: dict[str, Any] = Body(...),
+    _: None = Depends(require_gpt_api_key),
+    client: StakeClient = Depends(get_stake_client),
+    job_store: SupabaseLocalUiJobStore = Depends(get_local_ui_job_store),
+) -> Any:
+    if not job_store.enabled():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "source": "local_ui_bridge",
+                "message": (
+                    "Supabase local UI bridge is not configured. Set SUPABASE_URL "
+                    "and SUPABASE_SERVICE_ROLE_KEY on Render and the local helper."
+                ),
+            },
+        )
+
+    review_only = _bool_from_body(payload, "reviewOnly", "review_only", True)
+    if not review_only:
+        raise HTTPException(
+            status_code=422,
+            detail="reviewOnly must be true. AZP will not place bets or enter stake amounts.",
+        )
+
+    matchup = str(payload.get("matchup") or "").strip()
+    fixture_slug = str(payload.get("fixtureSlug") or "").strip()
+    if not fixture_slug and not matchup:
+        raise HTTPException(status_code=422, detail="fixtureSlug or matchup is required")
+
+    slate_date = _date_from_body(payload)
+    timeout_seconds = _clean_int_from_body(
+        payload,
+        "timeoutSeconds",
+        20,
+        minimum=1,
+        maximum=60,
+    )
+    schedule_limit = _clean_int_from_body(
+        payload,
+        "scheduleLimit",
+        25,
+        minimum=1,
+        maximum=100,
+    )
+    if not fixture_slug:
+        fixture_slug = await _resolve_stake_fixture_slug(
+            client=client,
+            matchup=matchup,
+            slate_date=slate_date,
+            limit=schedule_limit,
+        )
+
+    request = {
+        "matchup": matchup or None,
+        "fixtureSlug": fixture_slug,
+        "date": slate_date.isoformat() if slate_date else None,
+        "requestedBy": "custom_gpt",
+        "purpose": "stake_ui_remove_sidebar_group",
+        "reviewOnly": True,
+        "forbiddenActions": ["enter_stake_amount", "click_place_bet"],
+    }
+    job: dict[str, Any] | None = None
+    try:
+        job = await job_store.create_job(
+            job_type=STAKE_REMOVE_SIDEBAR_GROUP_JOB_TYPE,
+            request=request,
+            timeout_seconds=timeout_seconds,
+        )
+        completed = await job_store.wait_for_completed_result(
+            job["jobId"],
+            timeout_seconds=timeout_seconds,
+        )
+    except LocalUiBridgeDisabled as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+    except LocalUiBridgeTimeout as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "source": "local_ui_bridge",
+                "message": str(exc),
+                "fixtureSlug": fixture_slug,
+                "matchup": matchup or None,
+                "jobId": (job or {}).get("jobId"),
+            },
+        ) from exc
+    except LocalUiBridgeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"source": "local_ui_bridge", "message": str(exc)},
+        ) from exc
+
+    if completed.get("status") != "completed":
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "source": "local_ui_bridge",
+                "message": completed.get("error") or "Local helper job did not complete.",
+                "status": completed.get("status"),
+                "jobId": completed.get("jobId"),
+            },
+        )
+
+    result = completed.get("result") or {}
+    return {
+        "decisionOwner": "custom_gpt",
+        "source": "stake_ui_remove_sidebar_group_via_local_helper",
+        "purpose": "stake_ui_review_slip_sidebar_removal",
+        "matchup": matchup or result.get("matchup"),
+        "date": slate_date.isoformat() if slate_date else None,
+        "fixtureSlug": fixture_slug,
+        "bridge": _local_ui_bridge_summary(completed),
+        "result": _compact_remove_sidebar_group_result(result),
     }
 
 
@@ -1561,6 +1682,25 @@ def _compact_review_slip_result(result: dict[str, Any]) -> dict[str, Any]:
         "safety": {
             "enteredStakeAmount": False,
             "clickedPlaceBet": False,
+            **(result.get("safety") or {}),
+        },
+    }
+
+
+def _compact_remove_sidebar_group_result(result: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "source": result.get("source"),
+        "capturedAt": result.get("capturedAt"),
+        "status": result.get("status"),
+        "fixtureSlug": result.get("fixtureSlug"),
+        "matchup": result.get("matchup"),
+        "teams": result.get("teams") or [],
+        "removeResult": result.get("removeResult") or {},
+        "slip": result.get("slip") or {},
+        "safety": {
+            "enteredStakeAmount": False,
+            "clickedPlaceBet": False,
+            "removedSidebarGroupOnly": True,
             **(result.get("safety") or {}),
         },
     }

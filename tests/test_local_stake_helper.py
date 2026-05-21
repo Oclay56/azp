@@ -216,6 +216,51 @@ def test_process_job_runs_sgm_selection_clearer(monkeypatch):
     assert store.completed[0][1]["status"] == "cleared"
 
 
+def test_process_job_runs_sidebar_group_remover(monkeypatch):
+    def fake_remove_stake_sidebar_group(
+        *,
+        cdp_url: str,
+        fixture_slug: str | None = None,
+        matchup: str | None = None,
+    ):
+        assert cdp_url == "http://127.0.0.1:9222"
+        assert fixture_slug == "46575351-new-york-yankees-toronto-blue-jays"
+        assert matchup == "Yankees vs Blue Jays"
+        return {
+            "source": "stake_ui_remove_sidebar_group",
+            "status": "removed",
+            "fixtureSlug": fixture_slug,
+            "matchup": matchup,
+        }
+
+    monkeypatch.setattr(
+        local_stake_helper,
+        "remove_stake_sidebar_group",
+        fake_remove_stake_sidebar_group,
+    )
+    store = FakeJobStore()
+    job = {
+        "jobId": "job-remove",
+        "jobType": "stake_ui_remove_sidebar_group",
+        "request": {
+            "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
+            "matchup": "Yankees vs Blue Jays",
+        },
+    }
+
+    asyncio.run(
+        local_stake_helper.process_job(
+            store,
+            job,
+            cdp_url="http://127.0.0.1:9222",
+        )
+    )
+
+    assert not store.failed
+    assert store.completed[0][0] == "job-remove"
+    assert store.completed[0][1]["status"] == "removed"
+
+
 def test_process_job_does_not_crash_when_failure_reporting_fails(monkeypatch, capsys):
     def fake_read_stake_sgm_board(fixture_slug: str, *, cdp_url: str):
         raise RuntimeError("Stake is still region-blocked in this browser session.")
