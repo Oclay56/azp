@@ -2542,6 +2542,14 @@ def _stake_ui_exact_selection_schema() -> dict[str, Any]:
                     "Use this instead of reconstructing player/market/line/odds."
                 ),
             },
+            "selectionToken": {
+                "type": "string",
+                "description": (
+                    "Best. Snapshot-backed selectionToken returned by getStakeUiSgmBoard. "
+                    "Use this when available; it lets the helper revalidate the exact "
+                    "UI row before clicking."
+                ),
+            },
             "player": {
                 "type": "string",
                 "description": "Player name exactly as returned by getStakeUiSgmBoard. Omit only for team or match markets.",
@@ -2558,8 +2566,8 @@ def _stake_ui_exact_selection_schema() -> dict[str, Any]:
             "marketId": {"type": "string"},
         },
         "description": (
-            "Use rowId when available. If rowId is unavailable, provide exact market, side, line, "
-            "and odds from getStakeUiSgmBoard."
+            "Use selectionToken when available, otherwise rowId. If neither is available, "
+            "provide exact market, side, line, and odds from getStakeUiSgmBoard."
         ),
         "additionalProperties": True,
     }
@@ -2593,7 +2601,10 @@ def _stake_ui_review_slip_request_body() -> dict[str, Any]:
                             "minItems": 1,
                             "maxItems": 20,
                             "items": exact_selection_schema,
-                            "description": "Exact UI-backed legs returned from getStakeUiSgmBoard. Prefer rowId-only objects.",
+                            "description": (
+                                "Exact UI-backed legs returned from getStakeUiSgmBoard. "
+                                "Prefer selectionToken-only objects."
+                            ),
                         },
                         "rowIds": {
                             "type": "array",
@@ -2602,6 +2613,15 @@ def _stake_ui_review_slip_request_body() -> dict[str, Any]:
                             "items": {"type": "string"},
                             "description": (
                                 "Preferred shorthand: rowId values copied exactly from getStakeUiSgmBoard rows."
+                            ),
+                        },
+                        "selectionTokens": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 20,
+                            "items": {"type": "string"},
+                            "description": (
+                                "Best shorthand: selectionToken values copied exactly from getStakeUiSgmBoard rows."
                             ),
                         },
                         "timeoutSeconds": {"type": "integer", "minimum": 1, "maximum": 60},
@@ -2655,7 +2675,9 @@ def _stake_ui_review_slip_batch_request_body() -> dict[str, Any]:
                                         "minItems": 1,
                                         "maxItems": 20,
                                         "items": exact_selection_schema,
-                                        "description": "Exact UI-backed legs. Prefer rowId-only objects.",
+                                        "description": (
+                                            "Exact UI-backed legs. Prefer selectionToken-only objects."
+                                        ),
                                     },
                                     "rowIds": {
                                         "type": "array",
@@ -2664,6 +2686,15 @@ def _stake_ui_review_slip_batch_request_body() -> dict[str, Any]:
                                         "items": {"type": "string"},
                                         "description": (
                                             "Preferred shorthand: rowId values copied exactly from this game's getStakeUiSgmBoard rows."
+                                        ),
+                                    },
+                                    "selectionTokens": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "maxItems": 20,
+                                        "items": {"type": "string"},
+                                        "description": (
+                                            "Best shorthand: selectionToken values copied exactly from this game's getStakeUiSgmBoard rows."
                                         ),
                                     },
                                 },
