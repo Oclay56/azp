@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app.stake_sgm_browser import (
+    _add_bet_confirmed,
     _check_page_ready,
     _fixture_matchup_from_slug,
     _find_or_open_fixture_page,
@@ -153,3 +154,28 @@ def test_market_aliases_cover_stake_sgm_team_and_translated_labels():
     assert "RBIs" in _market_display_aliases("Team RBIs")
     assert "Failed Attempts" in _market_display_aliases("Strikeouts")
     assert "First Well Deserved Run" in _market_display_aliases("First ER")
+
+
+def test_add_bet_confirmation_requires_sidebar_change_when_existing_slip_present():
+    before = {
+        "rightPanelEmpty": False,
+        "rightPanelTextDigest": "same",
+        "rightPanelTextLength": 120,
+        "rightPanelSelectionCount": 2,
+    }
+    unchanged_after = {
+        "rightPanelEmpty": False,
+        "rightPanelTextDigest": "same",
+        "rightPanelTextLength": 120,
+        "rightPanelSelectionCount": 2,
+    }
+    changed_after = {
+        "rightPanelEmpty": False,
+        "rightPanelTextDigest": "different",
+        "rightPanelTextLength": 180,
+        "rightPanelSelectionCount": 4,
+    }
+
+    assert not _add_bet_confirmed(before, unchanged_after)
+    assert _add_bet_confirmed(before, changed_after)
+    assert _add_bet_confirmed({"rightPanelEmpty": True}, changed_after)

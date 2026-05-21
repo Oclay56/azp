@@ -587,6 +587,11 @@ def _click_sgm_review_selections(page: Any, rows: list[dict[str, Any]]) -> list[
 
 def _click_sgm_add_bet_button(page: Any, *, expected_legs: int) -> dict[str, Any]:
     try:
+        before_state = _read_bet_slip_state(page)
+        sticky_result = _click_custom_bet_sticky_add(page, before_state=before_state)
+        if sticky_result.get("status") == "clicked":
+            return sticky_result
+
         result = page.evaluate(
             """
             async ({ expectedLegs }) => {
@@ -694,16 +699,26 @@ def _click_sgm_add_bet_button(page: Any, *, expected_legs: int) -> dict[str, Any
         )
         page.wait_for_timeout(1_000)
         result["postClick"] = _read_bet_slip_state(page)
-        if result.get("status") == "clicked" and result["postClick"].get("rightPanelEmpty"):
-            fallback = _click_custom_bet_sticky_add(page)
-            fallback["initialAddBetClick"] = result
-            return fallback
+        result["beforeClick"] = before_state
+        result["addBetConfirmed"] = _add_bet_confirmed(before_state, result["postClick"])
+        if result.get("status") == "clicked" and not result["addBetConfirmed"]:
+            return {
+                "status": "not_clicked",
+                "reason": "add_bet_click_did_not_update_sidebar",
+                "initialStickyClick": sticky_result,
+                "initialAddBetClick": result,
+                "postClick": result["postClick"],
+            }
         return result
     except Exception as exc:
         return {"status": "not_clicked", "reason": str(exc)}
 
 
-def _click_custom_bet_sticky_add(page: Any) -> dict[str, Any]:
+def _click_custom_bet_sticky_add(
+    page: Any,
+    *,
+    before_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     try:
         button = page.locator("#custom-bet-sticky-add")
         if not button.count():
@@ -714,11 +729,13 @@ def _click_custom_bet_sticky_add(page: Any) -> dict[str, Any]:
         for _ in range(16):
             page.wait_for_timeout(250)
             post_click = _read_bet_slip_state(page)
-            if post_click and not post_click.get("rightPanelEmpty", True):
+            if _add_bet_confirmed(before_state or {}, post_click):
                 return {
                     "status": "clicked",
                     "clickedText": "custom-bet-sticky-add",
                     "clickedBy": "playwright_locator",
+                    "addBetConfirmed": True,
+                    "beforeClick": before_state or {},
                     "postClick": post_click,
                 }
         return {
@@ -726,10 +743,30 @@ def _click_custom_bet_sticky_add(page: Any) -> dict[str, Any]:
             "reason": "custom_bet_sticky_add_did_not_update_bet_slip",
             "clickedText": "custom-bet-sticky-add",
             "clickedBy": "playwright_locator",
+            "addBetConfirmed": False,
+            "beforeClick": before_state or {},
             "postClick": post_click,
         }
     except Exception as exc:
         return {"status": "not_clicked", "reason": f"custom_bet_sticky_add_click_failed: {exc}"}
+
+
+def _add_bet_confirmed(before_state: dict[str, Any], after_state: dict[str, Any]) -> bool:
+    if not after_state or after_state.get("rightPanelEmpty", True):
+        return False
+    if before_state.get("rightPanelEmpty", True):
+        return True
+
+    before_count = _int_or_none(before_state.get("rightPanelSelectionCount")) or 0
+    after_count = _int_or_none(after_state.get("rightPanelSelectionCount")) or 0
+    if after_count > before_count:
+        return True
+
+    before_digest = str(before_state.get("rightPanelTextDigest") or "")
+    after_digest = str(after_state.get("rightPanelTextDigest") or "")
+    before_length = _int_or_none(before_state.get("rightPanelTextLength")) or 0
+    after_length = _int_or_none(after_state.get("rightPanelTextLength")) or 0
+    return bool(after_digest and after_digest != before_digest and after_length > before_length + 10)
 
 
 def _read_bet_slip_state(page: Any) -> dict[str, Any]:
@@ -759,6 +796,13 @@ def _read_bet_slip_state(page: Any) -> dict[str, Any]:
                     "wettschein ist leer",
                   ];
                   const hasEmptyPhrase = (text) => emptyPhrases.some((phrase) => text.includes(phrase));
+                  const textDigest = (text) => {
+                    let hash = 0;
+                    for (let index = 0; index < text.length; index += 1) {
+                      hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+                    }
+                    return String(hash);
+                  };
                   const rightPanel = document.querySelector("#right-sidebar") || Array.from(document.querySelectorAll("aside,[role='complementary'],body *"))
                     .filter(visible)
                     .find((el) => {
@@ -769,12 +813,16 @@ def _read_bet_slip_state(page: Any) -> dict[str, Any]:
                         && (text.includes("bet slip") || text.includes("betting slip") || text.includes("wettschein"));
                     });
                   const panelText = rightPanel ? norm(rightPanel.innerText || rightPanel.textContent || "") : "";
+                  const selectionWords = panelText.match(/\\b(over|under|above|below|uber|unter|mehr|weniger)\\b/g) || [];
                   return {
                     betSlipEmpty: hasEmptyPhrase(bodyText),
                     rightPanelFound: Boolean(rightPanel),
                     rightPanelEmpty: rightPanel ? hasEmptyPhrase(panelText) : true,
                     rightPanelHasTotalStake: panelText.includes("total stake") || panelText.includes("total deployment"),
                     rightPanelHasPlaceBet: panelText.includes("place bet") || panelText.includes("placing bets"),
+                    rightPanelSelectionCount: selectionWords.length,
+                    rightPanelTextDigest: textDigest(panelText),
+                    rightPanelTextLength: panelText.length,
                     rightPanelTextSample: panelText.slice(0, 260),
                   };
                 }
@@ -1613,6 +1661,13 @@ def _float_or_original(value: Any) -> Any:
 def _float_or_none(value: Any) -> float | None:
     try:
         return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(value: Any) -> int | None:
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return None
 
