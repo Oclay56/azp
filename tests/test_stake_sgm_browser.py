@@ -11,6 +11,7 @@ from app.stake_sgm_browser import (
     _normalize_mlb_game_link,
     _has_logged_out_warning,
     _market_display_aliases,
+    _market_click_identity,
     _market_search_text,
     _review_add_summary,
     _sidebar_group_target,
@@ -158,6 +159,17 @@ def test_market_aliases_cover_stake_sgm_team_and_translated_labels():
     assert "RBIs" in _market_display_aliases("Team RBIs")
     assert "Failed Attempts" in _market_display_aliases("Strikeouts")
     assert "First Well Deserved Run" in _market_display_aliases("First ER")
+
+
+def test_market_click_identity_blocks_ambiguous_half_point_hitter_markets():
+    runs_identity = _market_click_identity("Runs")
+    assert "runs" in runs_identity["aliases"]
+    assert "home runs" in runs_identity["blockedAliases"]
+    assert "earned runs" in runs_identity["blockedAliases"]
+
+    hits_identity = _market_click_identity("Hits")
+    assert "hits" in hits_identity["aliases"]
+    assert "hits allowed" in hits_identity["blockedAliases"]
 
 
 def test_add_bet_confirmation_requires_sidebar_change_when_existing_slip_present():

@@ -1373,6 +1373,7 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
     click_row = {
         **row,
         "marketAliases": _market_display_aliases(str(row.get("market") or "")),
+        "marketClickIdentity": _market_click_identity(str(row.get("market") or "")),
     }
     if player_or_team:
         _filter_sgm_board(page, str(player_or_team))
@@ -1440,9 +1441,15 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
             "walks": ["walks"],
             "win probability": ["win probability", "probability of winning"],
           };
-          const aliases = Array.isArray(row.marketAliases) && row.marketAliases.length
+          const marketIdentity = row.marketClickIdentity || {};
+          const aliases = Array.isArray(marketIdentity.aliases) && marketIdentity.aliases.length
+            ? marketIdentity.aliases.map(norm).filter(Boolean)
+            : Array.isArray(row.marketAliases) && row.marketAliases.length
             ? row.marketAliases.map(norm).filter(Boolean)
             : (marketAliases[wanted.market] || [wanted.market]).filter(Boolean);
+          const blockedAliases = Array.isArray(marketIdentity.blockedAliases)
+            ? marketIdentity.blockedAliases.map(norm).filter(Boolean)
+            : [];
           const targetOdds = numberValue(row.odds) ?? numberValue(row[wanted.side]) ?? numberValue(oddsText);
           const targetLine = numberValue(row.line);
           const oddsVariants = [
@@ -1464,7 +1471,27 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
           const textHasLine = (text) => (
             wanted.line ? text.includes(wanted.line) : true
           ) || textHasNumber(text, targetLine, 0.001);
-          const rowHasMarket = (text) => !aliases.length || aliases.some((alias) => text.includes(alias));
+          const phraseInText = (text, phrase) => {
+            if (!phrase) {
+              return false;
+            }
+            const parts = phrase.split(" ").filter(Boolean);
+            if (parts.length === 1) {
+              return text.split(" ").includes(phrase);
+            }
+            return text.includes(phrase);
+          };
+          const rowMarketMatch = (text) => {
+            const blockedAlias = blockedAliases.find((alias) => phraseInText(text, alias));
+            if (blockedAlias) {
+              return { matched: false, blockedAlias };
+            }
+            if (!aliases.length) {
+              return { matched: true, blockedAlias: null };
+            }
+            const matchedAlias = aliases.find((alias) => phraseInText(text, alias));
+            return { matched: Boolean(matchedAlias), blockedAlias: null, matchedAlias };
+          };
           const buttonOdds = (text) => {
             const matches = String(text || "").match(/\\d+(?:[.,]\\d+)?/g) || [];
             const values = matches.map(numberValue).filter((value) => value != null);
@@ -1501,6 +1528,7 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
 
           let scopedCandidates = [];
           let lastCandidateSamples = [];
+          let marketMismatchSamples = [];
           for (let attempt = 0; attempt < 24; attempt += 1) {
             const candidates = candidateElements();
             lastCandidateSamples = candidates.slice(0, 8).map((el) => String(el.innerText || el.textContent || "").trim());
@@ -1529,7 +1557,15 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
                 if (depth <= 2 && hasSide && textHasLine(text)) {
                   lineSideMatched = true;
                 }
-                if (rowHasMarket(text) && rect.height <= 180) {
+                const marketMatch = rowMarketMatch(text);
+                if (marketMatch.blockedAlias) {
+                  marketMismatchSamples.push({
+                    requestedMarket: row.market,
+                    blockedAlias: marketMatch.blockedAlias,
+                    sample: text.slice(0, 220),
+                  });
+                }
+                if (marketMatch.matched && rect.height <= 180) {
                   marketMatched = true;
                 }
                 combinedText = `${text} ${combinedText}`.slice(0, 1000);
@@ -1587,10 +1623,15 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
           if (scopedCandidates.length < 1) {
             return {
               status: "not_clicked",
-              reason: "no visible exact clickable selection button found",
+              reason: marketMismatchSamples.length
+                ? "market_mismatch_requested_visible_row_conflict"
+                : "no visible exact clickable selection button found",
+              requestedMarket: row.market,
               candidateCount: scopedCandidates.length,
               oddsVariants,
               marketAliases: aliases,
+              blockedMarketAliases: blockedAliases,
+              marketMismatchSamples: marketMismatchSamples.slice(0, 5),
               matchedBy: "player_or_scope_market_line_side",
               candidateSamples: lastCandidateSamples,
             };
@@ -1785,6 +1826,56 @@ def _market_display_aliases(value: str) -> list[str]:
         "win probability": ["Win Probability", "Probability of Winning"],
     }
     return aliases.get(normalized, [value])
+
+
+def _market_click_identity(value: str) -> dict[str, list[str]]:
+    normalized = _text_key(value)
+    aliases = _unique_nonempty(_text_key(alias) for alias in _market_display_aliases(value))
+    blocked_aliases_by_market = {
+        "hits": ["hits allowed", "team hits"],
+        "rbi": ["team rbi", "team rbis"],
+        "rbis": ["team rbi", "team rbis"],
+        "runs": [
+            "home runs",
+            "match home runs",
+            "play home runs",
+            "earned runs",
+            "runs achieved",
+            "runs allowed",
+            "team runs",
+            "first earned run",
+            "first well deserved run",
+        ],
+        "team hits": ["hits allowed"],
+        "team runs": [
+            "home runs",
+            "match home runs",
+            "play home runs",
+            "earned runs",
+            "runs achieved",
+            "runs allowed",
+            "first earned run",
+            "first well deserved run",
+        ],
+        "team rbi": ["player rbi"],
+        "team rbis": ["player rbi"],
+        "total bases": ["team total bases"],
+    }
+    blocked_aliases = _unique_nonempty(
+        _text_key(alias) for alias in blocked_aliases_by_market.get(normalized, [])
+    )
+    return {"aliases": aliases, "blockedAliases": blocked_aliases}
+
+
+def _unique_nonempty(values) -> list[str]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            unique.append(text)
+            seen.add(text)
+    return unique
 
 
 def _review_slip_result(
