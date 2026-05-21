@@ -1,18 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.gpt_action import build_gpt_action_openapi_schema
 from app.main import app, get_local_ui_job_store, get_stake_client, _compact_stake_ui_sgm_board
-from app.stake_sgm_browser import (
-    make_sgm_selection_token,
-    match_sgm_review_selections,
-    normalize_sgm_response,
-    parse_sgm_selection_token,
-)
+from app.stake_sgm_browser import match_sgm_review_selections, normalize_sgm_response
 
 
 class FakeStakeClient:
@@ -272,10 +267,8 @@ def test_gpt_schema_exposes_review_slip_build_action():
     properties = operation["requestBody"]["content"]["application/json"]["schema"]["properties"]
     assert properties["reviewOnly"]["const"] is True
     assert "rowIds" in properties
-    assert "selectionTokens" in properties
     selection_schema = properties["selections"]["items"]
     assert "rowId" in selection_schema["properties"]
-    assert "selectionToken" in selection_schema["properties"]
 
 
 def test_gpt_schema_exposes_stake_ui_mlb_games_action():
@@ -299,9 +292,7 @@ def test_gpt_schema_exposes_batch_review_slip_action():
     assert "groups" in properties
     group_schema = properties["groups"]["items"]
     assert "rowIds" in group_schema["properties"]
-    assert "selectionTokens" in group_schema["properties"]
     assert "rowId" in group_schema["properties"]["selections"]["items"]["properties"]
-    assert "selectionToken" in group_schema["properties"]["selections"]["items"]["properties"]
 
 
 def test_compact_sgm_board_returns_stable_row_ids_for_duplicate_odds():
@@ -353,51 +344,6 @@ def test_compact_sgm_board_returns_stable_row_ids_for_duplicate_odds():
     assert all(row["rowId"] for row in rows)
     assert rows[0]["odds"] == rows[1]["odds"]
     assert rows[0]["rowId"] != rows[1]["rowId"]
-
-
-def test_compact_sgm_board_returns_snapshot_backed_selection_tokens():
-    board = {
-        "source": "stake_ui_sgm",
-        "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
-        "capturedAt": "2026-05-20T20:00:00+00:00",
-        "playerProps": [
-            {
-                "team": "New York Yankees",
-                "player": "Austin Wells",
-                "scope": "player",
-                "market": "Hits",
-                "line": 0.5,
-                "under": 2.1,
-                "over": 1.62,
-                "playable": True,
-                "lineId": "line-a",
-                "marketId": "market-hits",
-                "playerId": "player-a",
-            }
-        ],
-        "teamMarkets": [],
-    }
-
-    compact = _compact_stake_ui_sgm_board(
-        board,
-        limit=10,
-        side="under",
-        market="",
-        scope="",
-        playable_only=True,
-    )
-
-    row = compact["rows"][0]
-    payload = parse_sgm_selection_token(row["selectionToken"], validate_expiry=False)
-
-    assert compact["snapshotId"].startswith("sgms_")
-    assert compact["selectionTokenTtlSeconds"] > 0
-    assert row["snapshotId"] == compact["snapshotId"]
-    assert row["tokenExpiresAt"]
-    assert payload["fixtureSlug"] == "46575351-new-york-yankees-toronto-blue-jays"
-    assert payload["snapshotId"] == compact["snapshotId"]
-    assert payload["rowId"] == row["rowId"]
-    assert payload["side"] == "under"
 
 
 def test_stake_ui_mlb_games_route_creates_job_and_returns_completed_result():
@@ -513,35 +459,6 @@ def test_stake_ui_review_slip_batch_route_accepts_row_ids_without_reconstructed_
     assert created_request["groups"][0]["selections"] == [
         {"rowId": "sgm_abc123"},
         {"rowId": "sgm_def456"},
-    ]
-
-
-def test_stake_ui_review_slip_batch_route_accepts_selection_tokens_without_reconstructed_fields():
-    fake_store = FakeCompletedBatchBuildJobStore()
-    app.dependency_overrides[get_local_ui_job_store] = lambda: fake_store
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/mlb/stake-ui/review-slip-batch",
-            json={
-                "reviewOnly": True,
-                "timeoutSeconds": 2,
-                "groups": [
-                    {
-                        "matchup": "Yankees vs Blue Jays",
-                        "fixtureSlug": "46575351-new-york-yankees-toronto-blue-jays",
-                        "selectionTokens": ["sgmt_token_1", "sgmt_token_2"],
-                    }
-                ],
-            },
-        )
-
-    created_request = fake_store.created_jobs[0]["request"]
-
-    assert response.status_code == 200
-    assert created_request["groups"][0]["selections"] == [
-        {"selectionToken": "sgmt_token_1"},
-        {"selectionToken": "sgmt_token_2"},
     ]
 
 
@@ -683,31 +600,6 @@ def test_stake_ui_review_slip_route_accepts_row_ids_without_reconstructed_fields
 
     assert response.status_code == 200
     assert created_request["selections"] == [{"rowId": "sgm_row_1"}, {"rowId": "sgm_row_2"}]
-
-
-def test_stake_ui_review_slip_route_accepts_selection_tokens_without_reconstructed_fields():
-    fake_store = FakeCompletedBuildJobStore()
-    app.dependency_overrides[get_local_ui_job_store] = lambda: fake_store
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/mlb/stake-ui/review-slip",
-            json={
-                "matchup": "Braves vs Marlins",
-                "fixtureSlug": "46450286-miami-marlins-atlanta-braves",
-                "timeoutSeconds": 2,
-                "reviewOnly": True,
-                "selectionTokens": ["sgmt_token_1", "sgmt_token_2"],
-            },
-        )
-
-    created_request = fake_store.created_jobs[0]["request"]
-
-    assert response.status_code == 200
-    assert created_request["selections"] == [
-        {"selectionToken": "sgmt_token_1"},
-        {"selectionToken": "sgmt_token_2"},
-    ]
 
 
 def test_stake_ui_review_slip_route_rejects_missing_exact_selection_fields():
@@ -952,79 +844,3 @@ def test_match_sgm_review_selections_can_match_by_row_id_only():
     assert result["matchedRows"][0]["side"] == "under"
     assert result["matchedRows"][0]["odds"] == 2.1
     assert result["matchedRows"][0]["rowId"] == target_row_id
-
-
-def test_match_sgm_review_selections_can_match_by_snapshot_selection_token_after_odds_move():
-    fixture_slug = "46575351-new-york-yankees-toronto-blue-jays"
-    snapshot_row = {
-        "team": "Toronto Blue Jays",
-        "player": "George Springer",
-        "scope": "player",
-        "market": "Hits",
-        "line": 0.5,
-        "under": 2.1,
-        "over": 1.62,
-        "playable": True,
-        "lineId": "line-b",
-        "marketId": "market-hits",
-        "playerId": "player-b",
-    }
-    token = make_sgm_selection_token(
-        fixture_slug=fixture_slug,
-        snapshot_id="sgms_test_snapshot",
-        captured_at=datetime.now(timezone.utc).isoformat(),
-        row=snapshot_row,
-        side="under",
-    )
-    current_row = dict(snapshot_row, under=2.05)
-    board = {
-        "fixtureSlug": fixture_slug,
-        "playerProps": [current_row],
-        "teamMarkets": [],
-    }
-
-    result = match_sgm_review_selections(board, [{"selectionToken": token}])
-
-    assert result["missingSelections"] == []
-    assert len(result["matchedRows"]) == 1
-    assert result["matchedRows"][0]["player"] == "George Springer"
-    assert result["matchedRows"][0]["side"] == "under"
-    assert result["matchedRows"][0]["line"] == 0.5
-    assert result["matchedRows"][0]["odds"] == 2.05
-    assert result["matchedRows"][0]["selectionToken"] == token
-    assert result["matchedRows"][0]["snapshotId"] == "sgms_test_snapshot"
-
-
-def test_match_sgm_review_selections_rejects_expired_selection_token():
-    fixture_slug = "46575351-new-york-yankees-toronto-blue-jays"
-    row = {
-        "team": "Toronto Blue Jays",
-        "player": "George Springer",
-        "scope": "player",
-        "market": "Hits",
-        "line": 0.5,
-        "under": 2.1,
-        "over": 1.62,
-        "playable": True,
-        "lineId": "line-b",
-        "marketId": "market-hits",
-        "playerId": "player-b",
-    }
-    token = make_sgm_selection_token(
-        fixture_slug=fixture_slug,
-        snapshot_id="sgms_test_snapshot",
-        captured_at="2026-05-20T20:00:00+00:00",
-        row=row,
-        side="under",
-        ttl_seconds=1,
-    )
-    board = {
-        "fixtureSlug": fixture_slug,
-        "playerProps": [row],
-        "teamMarkets": [],
-    }
-
-    result = match_sgm_review_selections(board, [{"selectionToken": token}])
-
-    assert result["matchedRows"] == []
-    assert "expired" in result["missingSelections"][0]["reason"]

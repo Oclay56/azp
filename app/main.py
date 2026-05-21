@@ -48,13 +48,7 @@ from .mlb_schedule import build_mlb_schedule_stake_map, build_mlb_schedule_view
 from .mlb_props import slug_key
 from .slate import DEFAULT_TIMEZONE
 from .stake_client import StakeAPIError, StakeClient, build_http_client
-from .stake_sgm_browser import (
-    SGM_SELECTION_TOKEN_TTL_SECONDS,
-    make_sgm_selection_row_id,
-    make_sgm_selection_token,
-    make_sgm_snapshot_id,
-    parse_sgm_selection_token,
-)
+from .stake_sgm_browser import make_sgm_selection_row_id
 from .storage import GptActionStore
 from .supabase_ledger import (
     supabase_ledger_enabled,
@@ -1240,20 +1234,10 @@ def _review_slip_selections_from_body(payload: dict[str, Any]) -> list[dict[str,
         if str(row_id or "").strip():
             raw_selections.append({"rowId": str(row_id).strip()})
 
-    raw_selection_tokens = payload.get("selectionTokens") or payload.get("selection_tokens")
-    if raw_selection_tokens is not None and not isinstance(raw_selection_tokens, list):
-        raise HTTPException(status_code=422, detail="selectionTokens must be a list")
-    for selection_token in raw_selection_tokens or []:
-        if str(selection_token or "").strip():
-            raw_selections.append({"selectionToken": str(selection_token).strip()})
-
     if not isinstance(raw_selections, list) or not raw_selections:
         raise HTTPException(
             status_code=422,
-            detail=(
-                "selections, rowIds, or selectionTokens must be a non-empty list of "
-                "exact Stake UI-backed legs"
-            ),
+            detail="selections or rowIds must be a non-empty list of exact Stake UI-backed legs",
         )
     if len(raw_selections) > 20:
         raise HTTPException(status_code=422, detail="selections cannot contain more than 20 legs")
@@ -1263,13 +1247,6 @@ def _review_slip_selections_from_body(payload: dict[str, Any]) -> list[dict[str,
     for index, raw_selection in enumerate(raw_selections, start=1):
         if not isinstance(raw_selection, dict):
             raise HTTPException(status_code=422, detail=f"selection {index} must be an object")
-
-        selection_token = _clean_nullable_text(
-            raw_selection.get("selectionToken") or raw_selection.get("selection_token")
-        )
-        if selection_token:
-            cleaned.append({"selectionToken": selection_token})
-            continue
 
         row_id = _clean_nullable_text(
             raw_selection.get("rowId")
@@ -1383,8 +1360,6 @@ async def _review_slip_groups_from_body(
             {
                 "selections": raw_group.get("selections"),
                 "rowIds": raw_group.get("rowIds") or raw_group.get("row_ids"),
-                "selectionTokens": raw_group.get("selectionTokens")
-                or raw_group.get("selection_tokens"),
             }
         )
         groups.append(
@@ -1515,7 +1490,6 @@ def _compact_stake_ui_sgm_board(
     scope: str,
     playable_only: bool,
 ) -> dict[str, Any]:
-    snapshot_id = make_sgm_snapshot_id(board)
     rows = _stake_ui_selection_rows(
         board,
         limit=limit,
@@ -1523,14 +1497,11 @@ def _compact_stake_ui_sgm_board(
         market=market,
         scope=scope,
         playable_only=playable_only,
-        snapshot_id=snapshot_id,
     )
     return {
         "source": board.get("source"),
         "fixtureSlug": board.get("fixtureSlug"),
         "capturedAt": board.get("capturedAt"),
-        "snapshotId": snapshot_id,
-        "selectionTokenTtlSeconds": SGM_SELECTION_TOKEN_TTL_SECONDS,
         "fixture": board.get("fixture") or {},
         "teams": board.get("teams") or [],
         "counts": board.get("counts") or {},
@@ -1555,7 +1526,6 @@ def _stake_ui_selection_rows(
     market: str,
     scope: str,
     playable_only: bool,
-    snapshot_id: str,
 ) -> list[dict[str, Any]]:
     source_rows = list(board.get("playerProps") or []) + list(board.get("teamMarkets") or [])
     wanted_sides = ("over", "under") if side == "any" else (side,)
@@ -1582,23 +1552,9 @@ def _stake_ui_selection_rows(
                 row,
                 row_side,
             )
-            selection_token = make_sgm_selection_token(
-                fixture_slug=str(board.get("fixtureSlug") or ""),
-                snapshot_id=snapshot_id,
-                captured_at=board.get("capturedAt"),
-                row=row,
-                side=row_side,
-            )
-            token_payload = parse_sgm_selection_token(
-                selection_token,
-                validate_expiry=False,
-            )
             compact_rows.append(
                 {
                     "rowId": row_id,
-                    "selectionToken": selection_token,
-                    "snapshotId": snapshot_id,
-                    "tokenExpiresAt": token_payload.get("expiresAt"),
                     "selectionId": f"{row.get('lineId') or ''}:{row_side}",
                     "propId": row.get("lineId"),
                     "player": row.get("player"),

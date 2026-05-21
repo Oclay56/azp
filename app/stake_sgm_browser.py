@@ -1,20 +1,15 @@
 from __future__ import annotations
 
-import base64
 import json
 import re
-from hashlib import sha1, sha256
-from datetime import datetime, timedelta, timezone
+from hashlib import sha1
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 
 DEFAULT_CDP_URL = "http://127.0.0.1:9222"
 STAKE_MLB_URL = "https://stake.com/sports/baseball/usa/mlb"
-SGM_SELECTION_TOKEN_PREFIX = "sgmt_"
-SGM_SELECTION_TOKEN_VERSION = 1
-SGM_SELECTION_TOKEN_TTL_SECONDS = 300
-_SGM_SELECTION_TOKEN_PURPOSE = "azp-sgm-selection-token-v1"
 
 MLB_TEAM_SLUGS = {
     "arizona-diamondbacks": "Arizona Diamondbacks",
@@ -385,23 +380,6 @@ def match_sgm_review_selections(
     missing_selections: list[dict[str, Any]] = []
 
     for selection in selections:
-        token_match, token_reason = _find_selection_row_by_selection_token(
-            source_rows,
-            str(board.get("fixtureSlug") or ""),
-            selection,
-        )
-        if token_match:
-            matched_rows.append(token_match)
-            continue
-        if token_reason:
-            missing_selections.append(
-                {
-                    "selection": selection,
-                    "reason": token_reason,
-                }
-            )
-            continue
-
         match = _find_selection_row_by_row_id(
             source_rows,
             str(board.get("fixtureSlug") or ""),
@@ -439,12 +417,6 @@ def _group_review_selections(group: dict[str, Any]) -> list[dict[str, Any]]:
     for row_id in raw_row_ids or []:
         if str(row_id or "").strip():
             selections.append({"rowId": str(row_id).strip()})
-    raw_selection_tokens = group.get("selectionTokens") or group.get("selection_tokens")
-    if raw_selection_tokens is not None and not isinstance(raw_selection_tokens, list):
-        return selections
-    for selection_token in raw_selection_tokens or []:
-        if str(selection_token or "").strip():
-            selections.append({"selectionToken": str(selection_token).strip()})
     return selections
 
 
@@ -477,117 +449,6 @@ def _find_selection_row_by_row_id(
                 return _matched_selection_row(row, side, current_row_id)
 
     return None
-
-
-def _find_selection_row_by_selection_token(
-    source_rows: list[dict[str, Any]],
-    fixture_slug: str,
-    selection: dict[str, Any],
-) -> tuple[dict[str, Any] | None, str | None]:
-    token = str(selection.get("selectionToken") or selection.get("selection_token") or "").strip()
-    if not token:
-        return None, None
-
-    try:
-        payload = parse_sgm_selection_token(token)
-    except ValueError as exc:
-        return None, f"invalid selection token: {exc}"
-
-    if _text_key(payload.get("fixtureSlug")) != _text_key(fixture_slug):
-        return None, "selection token fixture does not match the live Stake fixture"
-
-    side = str(payload.get("side") or "").strip().lower()
-    if side not in {"over", "under"}:
-        return None, "selection token has an invalid side"
-
-    token_row_id = str(payload.get("rowId") or "").strip()
-    if token_row_id:
-        for row in source_rows:
-            if not row.get("playable") or row.get(side) is None:
-                continue
-            current_row_id = make_sgm_selection_row_id(fixture_slug, row, side)
-            if current_row_id == token_row_id:
-                matched = _matched_selection_row(row, side, current_row_id)
-                _attach_selection_token_metadata(matched, payload, token)
-                return matched, None
-
-    identity_matches = [
-        row
-        for row in source_rows
-        if _row_matches_selection_token_payload(row, payload, side)
-    ]
-    if len(identity_matches) == 1:
-        row = identity_matches[0]
-        matched = _matched_selection_row(
-            row,
-            side,
-            make_sgm_selection_row_id(fixture_slug, row, side),
-        )
-        _attach_selection_token_metadata(matched, payload, token)
-        return matched, None
-    if len(identity_matches) > 1:
-        return None, "selection token matches multiple live UI rows; refresh the SGM board"
-
-    return None, "selection token row is expired, stale, or no longer playable in the live UI"
-
-
-def _row_matches_selection_token_payload(
-    row: dict[str, Any],
-    payload: dict[str, Any],
-    side: str,
-) -> bool:
-    if not row.get("playable") or row.get(side) is None:
-        return False
-    if not _numbers_equal(payload.get("line"), row.get("line")):
-        return False
-    if not _optional_text_matches(payload.get("scope"), row.get("scope")):
-        return False
-    if not _optional_text_matches(payload.get("team"), row.get("team")):
-        return False
-
-    token_player = payload.get("player")
-    token_player_id = payload.get("playerId")
-    if token_player or token_player_id:
-        if token_player_id and _text_key(token_player_id) != _text_key(row.get("playerId")):
-            return False
-        if not token_player_id and not _optional_text_matches(token_player, row.get("player")):
-            return False
-    elif row.get("player"):
-        return False
-
-    token_market_id = payload.get("marketId")
-    if token_market_id and _text_key(token_market_id) != _text_key(row.get("marketId")):
-        return False
-    elif not _optional_text_matches(payload.get("market"), row.get("market")):
-        return False
-
-    token_line_id = payload.get("lineId")
-    if token_line_id and row.get("lineId"):
-        if _text_key(token_line_id) != _text_key(row.get("lineId")):
-            return False
-
-    token_stat_id = payload.get("swishStatId")
-    if token_stat_id and row.get("swishStatId"):
-        if _text_key(token_stat_id) != _text_key(row.get("swishStatId")):
-            return False
-
-    return True
-
-
-def _attach_selection_token_metadata(
-    matched: dict[str, Any],
-    payload: dict[str, Any],
-    token: str,
-) -> None:
-    matched["selectionToken"] = token
-    matched["snapshotId"] = payload.get("snapshotId")
-    matched["tokenExpiresAt"] = payload.get("expiresAt")
-
-
-def _optional_text_matches(left: Any, right: Any) -> bool:
-    if left is None or str(left).strip() == "":
-        return True
-    return _text_key(left) == _text_key(right)
 
 
 def normalize_sgm_response(
@@ -1553,124 +1414,6 @@ def make_sgm_selection_row_id(fixture_slug: str, row: dict[str, Any], side: str)
     ]
     canonical = "|".join(_text_key(part) for part in identity_parts)
     return f"sgm_{sha1(canonical.encode('utf-8')).hexdigest()[:16]}"
-
-
-def make_sgm_snapshot_id(board: dict[str, Any]) -> str:
-    fixture_slug = str(board.get("fixtureSlug") or "")
-    captured_at = str(board.get("capturedAt") or "")
-    counts = board.get("counts") or {}
-    identity = json.dumps(
-        {
-            "fixtureSlug": fixture_slug,
-            "capturedAt": captured_at,
-            "counts": counts,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
-    return f"sgms_{sha1(identity.encode('utf-8')).hexdigest()[:16]}"
-
-
-def make_sgm_selection_token(
-    *,
-    fixture_slug: str,
-    snapshot_id: str,
-    captured_at: str | None,
-    row: dict[str, Any],
-    side: str,
-    ttl_seconds: int = SGM_SELECTION_TOKEN_TTL_SECONDS,
-) -> str:
-    issued_at = _parse_datetime(captured_at) or datetime.now(timezone.utc)
-    expires_at = issued_at + timedelta(seconds=max(1, int(ttl_seconds)))
-    side_key = str(side or "").strip().lower()
-    row_id = make_sgm_selection_row_id(fixture_slug, row, side_key)
-    payload = {
-        "v": SGM_SELECTION_TOKEN_VERSION,
-        "snapshotId": snapshot_id,
-        "fixtureSlug": str(fixture_slug or ""),
-        "rowId": row_id,
-        "scope": row.get("scope"),
-        "team": row.get("team"),
-        "player": row.get("player"),
-        "playerId": row.get("playerId"),
-        "market": row.get("market"),
-        "marketId": row.get("marketId"),
-        "lineId": row.get("lineId"),
-        "swishStatId": row.get("swishStatId"),
-        "line": row.get("line"),
-        "side": side_key,
-        "issuedAt": issued_at.isoformat(),
-        "expiresAt": expires_at.isoformat(),
-    }
-    payload_json = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    payload_part = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii").rstrip("=")
-    signature = _sgm_token_signature(payload_json)
-    return f"{SGM_SELECTION_TOKEN_PREFIX}{payload_part}.{signature}"
-
-
-def parse_sgm_selection_token(
-    token: str,
-    *,
-    validate_expiry: bool = True,
-    now: datetime | None = None,
-) -> dict[str, Any]:
-    text = str(token or "").strip()
-    if not text.startswith(SGM_SELECTION_TOKEN_PREFIX):
-        raise ValueError("missing token prefix")
-    try:
-        payload_part, signature = text[len(SGM_SELECTION_TOKEN_PREFIX) :].split(".", 1)
-    except ValueError as exc:
-        raise ValueError("malformed token") from exc
-
-    padding = "=" * (-len(payload_part) % 4)
-    try:
-        payload_json = base64.urlsafe_b64decode((payload_part + padding).encode("ascii")).decode(
-            "utf-8"
-        )
-        payload = json.loads(payload_json)
-    except (ValueError, json.JSONDecodeError) as exc:
-        raise ValueError("token payload is unreadable") from exc
-
-    expected_signature = _sgm_token_signature(payload_json)
-    if signature != expected_signature:
-        raise ValueError("token signature mismatch")
-    if payload.get("v") != SGM_SELECTION_TOKEN_VERSION:
-        raise ValueError("unsupported token version")
-
-    expires_at = _parse_datetime(payload.get("expiresAt"))
-    if validate_expiry and expires_at:
-        current_time = now or datetime.now(timezone.utc)
-        if current_time > expires_at:
-            raise ValueError("selection token expired; refresh the SGM board")
-
-    return payload
-
-
-def _sgm_token_signature(payload_json: str) -> str:
-    return sha256(f"{payload_json}|{_SGM_SELECTION_TOKEN_PURPOSE}".encode("utf-8")).hexdigest()[:16]
-
-
-def _parse_datetime(value: Any) -> datetime | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text:
-        return None
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
 
 
 def _line_rows(
