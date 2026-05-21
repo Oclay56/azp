@@ -8,6 +8,8 @@ from app.stake_sgm_browser import (
     _find_or_open_fixture_page,
     _normalize_mlb_game_link,
     _has_logged_out_warning,
+    _market_display_aliases,
+    _market_search_text,
     fixture_url,
 )
 
@@ -139,3 +141,15 @@ def test_fixture_matchup_from_slug_handles_multi_word_team_names():
         "matchup": "New York Yankees vs Toronto Blue Jays",
         "teams": ["New York Yankees", "Toronto Blue Jays"],
     }
+
+
+def test_market_aliases_cover_stake_sgm_team_and_translated_labels():
+    assert _market_search_text("Team Hits") == "hits"
+    assert _market_search_text("Team RBIs") == "rbi"
+    assert _market_search_text("Failed Attempts") == "strikeouts"
+
+    assert "Hits" in _market_display_aliases("Team Hits")
+    assert "Team RBIs" in _market_display_aliases("Team RBIs")
+    assert "RBIs" in _market_display_aliases("Team RBIs")
+    assert "Failed Attempts" in _market_display_aliases("Strikeouts")
+    assert "First Well Deserved Run" in _market_display_aliases("First ER")

@@ -832,6 +832,10 @@ def _open_same_game_multi_tab(page: Any) -> None:
 
 def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
     player_or_team = "" if row.get("scope") == "match_props" else row.get("player") or row.get("team") or ""
+    click_row = {
+        **row,
+        "marketAliases": _market_display_aliases(str(row.get("market") or "")),
+    }
     if player_or_team:
         _filter_sgm_board(page, str(player_or_team))
         _expand_sgm_owner(page, str(player_or_team))
@@ -880,6 +884,7 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
             : [];
           const marketAliases = {
             "earned runs": ["earned runs", "runs achieved", "runs allowed"],
+            "failed attempts": ["failed attempts", "strikeouts"],
             "first er": ["first er", "first earned run", "first well deserved run"],
             "first so": ["first so", "first strike out", "first strikeout"],
             "hits allowed": ["hits allowed"],
@@ -887,11 +892,19 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
             "match singles": ["match singles", "singles"],
             "match triples": ["match triples", "triples"],
             "outs": ["outs", "eliminated"],
+            "rbi": ["rbi", "rbis", "runs batted in"],
             "strikeouts": ["strikeouts", "failed attempts"],
+            "team hits": ["team hits", "hits"],
+            "team rbi": ["team rbi", "team rbis", "rbi", "rbis", "runs batted in"],
+            "team rbis": ["team rbis", "team rbi", "rbi", "rbis", "runs batted in"],
+            "team runs": ["team runs", "runs"],
+            "team total bases": ["team total bases", "total bases"],
             "walks": ["walks"],
             "win probability": ["win probability", "probability of winning"],
           };
-          const aliases = (marketAliases[wanted.market] || [wanted.market]).filter(Boolean);
+          const aliases = Array.isArray(row.marketAliases) && row.marketAliases.length
+            ? row.marketAliases.map(norm).filter(Boolean)
+            : (marketAliases[wanted.market] || [wanted.market]).filter(Boolean);
           const targetOdds = numberValue(row.odds) ?? numberValue(row[wanted.side]) ?? numberValue(oddsText);
           const targetLine = numberValue(row.line);
           const oddsVariants = [
@@ -1036,7 +1049,7 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
           if (scopedCandidates.length < 1) {
             return {
               status: "not_clicked",
-              reason: "no visible exact clickable odds cell found",
+              reason: "no visible exact clickable selection button found",
               candidateCount: scopedCandidates.length,
               oddsVariants,
               marketAliases: aliases,
@@ -1059,7 +1072,7 @@ def _click_one_sgm_selection(page: Any, row: dict[str, Any]) -> dict[str, Any]:
           };
         }
         """,
-        {"row": row, "oddsText": _display_number(row.get("odds"))},
+        {"row": click_row, "oddsText": _display_number(row.get("odds"))},
     )
     return {
         "selection": _compact_click_row(row),
@@ -1198,9 +1211,15 @@ def _expand_sgm_market(page: Any, value: str) -> None:
 def _market_search_text(value: str) -> str:
     normalized = value.strip().lower()
     aliases = {
+        "failed attempts": "strikeouts",
         "match home runs": "home runs",
         "match singles": "singles",
         "match triples": "triples",
+        "team hits": "hits",
+        "team rbi": "rbi",
+        "team rbis": "rbi",
+        "team runs": "runs",
+        "team total bases": "total bases",
     }
     return aliases.get(normalized, value)
 
@@ -1208,9 +1227,24 @@ def _market_search_text(value: str) -> str:
 def _market_display_aliases(value: str) -> list[str]:
     normalized = value.strip().lower()
     aliases = {
+        "earned runs": ["Earned Runs", "Runs Achieved", "Runs Allowed"],
+        "failed attempts": ["Failed Attempts", "Strikeouts"],
+        "first er": ["First ER", "First Earned Run", "First Well Deserved Run"],
+        "first so": ["First SO", "First Strike Out", "First Strikeout"],
+        "hits allowed": ["Hits Allowed"],
         "match home runs": ["Play Home Runs", "Match Home Runs", "Home Runs"],
         "match singles": ["Match Singles", "Singles"],
         "match triples": ["Match Triples", "Triples"],
+        "outs": ["Outs", "Eliminated"],
+        "rbi": ["RBI", "RBIs", "Runs Batted In"],
+        "strikeouts": ["Strikeouts", "Failed Attempts"],
+        "team hits": ["Team Hits", "Hits"],
+        "team rbi": ["Team RBI", "Team RBIs", "RBI", "RBIs", "Runs Batted In"],
+        "team rbis": ["Team RBIs", "Team RBI", "RBIs", "RBI", "Runs Batted In"],
+        "team runs": ["Team Runs", "Runs"],
+        "team total bases": ["Team Total Bases", "Total Bases"],
+        "walks": ["Walks"],
+        "win probability": ["Win Probability", "Probability of Winning"],
     }
     return aliases.get(normalized, [value])
 
