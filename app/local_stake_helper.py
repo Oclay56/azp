@@ -31,9 +31,17 @@ from .stake_sgm_browser import (
     read_stake_ui_state,
     remove_stake_sidebar_group,
 )
+from .supabase_cache import (
+    DEFAULT_JOB_RETENTION_HOURS,
+    DEFAULT_LOCAL_UI_JOB_TABLE,
+    DEFAULT_STALE_RUNNING_MINUTES,
+    run_cleanup,
+)
 
 
 DEFAULT_CHROME_USER_DATA_DIR = Path("data") / "chrome-stake-ui"
+DEFAULT_STAKE_START_URL = "https://stake.com"
+DEFAULT_AUTO_CLEANUP_MINUTES = 60.0
 
 
 async def run_helper(
@@ -43,6 +51,7 @@ async def run_helper(
     worker_id: str | None = None,
     autostart_chrome: bool = True,
     mode: str = "review",
+    auto_cleanup_minutes: float = DEFAULT_AUTO_CLEANUP_MINUTES,
 ) -> None:
     _load_dotenv()
     store = SupabaseLocalUiJobStore()
@@ -61,9 +70,18 @@ async def run_helper(
     print(f"Status: waiting for Stake UI jobs as {resolved_worker_id}")
     print(f"Mode: {mode} ({', '.join(job_types)})")
     print("Stop: press Ctrl+C in this window.")
+    cleanup_interval_seconds = max(auto_cleanup_minutes, 0.0) * 60
+    next_cleanup_at = 0.0
+    if cleanup_interval_seconds:
+        await _run_supabase_cache_cleanup("startup")
+        next_cleanup_at = time.monotonic() + cleanup_interval_seconds
 
     while True:
         try:
+            if cleanup_interval_seconds and time.monotonic() >= next_cleanup_at:
+                await _run_supabase_cache_cleanup("scheduled")
+                next_cleanup_at = time.monotonic() + cleanup_interval_seconds
+
             job = None
             for job_type in job_types:
                 job = await store.claim_next_pending_job(
@@ -195,11 +213,11 @@ async def _safe_fail_job(
 
 
 def ensure_debug_chrome(cdp_url: str = DEFAULT_CDP_URL) -> None:
-    if _cdp_is_ready(cdp_url):
-        return
-
+    cdp_ready = _cdp_is_ready(cdp_url)
     chrome_path = _chrome_path()
     if not chrome_path:
+        if cdp_ready:
+            return
         raise RuntimeError(
             "Could not find Chrome. Set AZP_CHROME_PATH to chrome.exe and retry."
         )
@@ -207,18 +225,11 @@ def ensure_debug_chrome(cdp_url: str = DEFAULT_CDP_URL) -> None:
     profile_dir = Path(os.getenv("AZP_STAKE_CHROME_PROFILE") or DEFAULT_CHROME_USER_DATA_DIR)
     profile_dir.mkdir(parents=True, exist_ok=True)
     port = _cdp_port(cdp_url)
-    subprocess.Popen(
-        [
-            str(chrome_path),
-            f"--remote-debugging-port={port}",
-            f"--user-data-dir={profile_dir.resolve()}",
-            "--window-size=1200,900",
-            "--window-position=-32000,-32000",
-            "about:blank",
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    if cdp_ready:
+        _open_visible_stake_chrome(chrome_path, profile_dir, port)
+        return
+
+    _open_visible_stake_chrome(chrome_path, profile_dir, port)
 
     deadline = time.monotonic() + 15
     while time.monotonic() < deadline:
@@ -226,6 +237,64 @@ def ensure_debug_chrome(cdp_url: str = DEFAULT_CDP_URL) -> None:
             return
         time.sleep(0.5)
     raise RuntimeError("Chrome did not expose the remote debugging port in time.")
+
+
+def _open_visible_stake_chrome(
+    chrome_path: Path,
+    profile_dir: Path,
+    port: int,
+) -> None:
+    subprocess.Popen(
+        _debug_chrome_args(chrome_path, profile_dir, port),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
+def _debug_chrome_args(chrome_path: Path, profile_dir: Path, port: int) -> list[str]:
+    start_url = os.getenv("AZP_STAKE_START_URL") or DEFAULT_STAKE_START_URL
+    return [
+        str(chrome_path),
+        f"--remote-debugging-port={port}",
+        f"--user-data-dir={profile_dir.resolve()}",
+        "--new-window",
+        "--start-maximized",
+        "--window-size=1400,900",
+        "--window-position=80,40",
+        start_url,
+    ]
+
+
+async def _run_supabase_cache_cleanup(reason: str) -> None:
+    try:
+        result = await asyncio.to_thread(_run_supabase_cache_cleanup_sync)
+    except Exception as exc:
+        print(f"[{time.strftime('%H:%M:%S')}] Supabase cleanup skipped ({reason}): {exc}")
+        return
+    print(
+        f"[{time.strftime('%H:%M:%S')}] Supabase cleanup ({reason}): "
+        f"expired {result['expiredJobs']}, deleted {result['deletedJobs']}"
+    )
+
+
+def _run_supabase_cache_cleanup_sync() -> dict[str, Any]:
+    supabase_url = os.getenv("SUPABASE_URL")
+    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+    if not supabase_url or not service_key:
+        raise RuntimeError("SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required.")
+    return run_cleanup(
+        supabase_url=supabase_url,
+        service_key=service_key,
+        table_name=os.getenv("AZP_LOCAL_UI_JOB_TABLE", DEFAULT_LOCAL_UI_JOB_TABLE),
+        retention_hours=_env_float(
+            "AZP_SUPABASE_JOB_RETENTION_HOURS",
+            DEFAULT_JOB_RETENTION_HOURS,
+        ),
+        stale_running_minutes=_env_float(
+            "AZP_SUPABASE_STALE_JOB_MINUTES",
+            DEFAULT_STALE_RUNNING_MINUTES,
+        ),
+    )
 
 
 def _cdp_is_ready(cdp_url: str) -> bool:
@@ -318,6 +387,16 @@ def _load_dotenv(path: Path | None = None) -> None:
             os.environ[key] = value
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def main() -> int:
     _load_dotenv()
     parser = argparse.ArgumentParser(description="Run the AZP local Stake UI helper.")
@@ -325,6 +404,13 @@ def main() -> int:
     parser.add_argument("--poll-seconds", type=float, default=2.0)
     parser.add_argument("--worker-id")
     parser.add_argument("--no-autostart-chrome", action="store_true")
+    parser.add_argument("--no-auto-cleanup", action="store_true")
+    parser.add_argument(
+        "--auto-cleanup-minutes",
+        type=float,
+        default=_env_float("AZP_SUPABASE_AUTO_CLEANUP_MINUTES", DEFAULT_AUTO_CLEANUP_MINUTES),
+        help="Run Supabase local UI job cleanup on this interval while the helper is open.",
+    )
     parser.add_argument(
         "--mode",
         choices=["review", "build", "all"],
@@ -341,6 +427,9 @@ def main() -> int:
                 worker_id=args.worker_id,
                 autostart_chrome=not args.no_autostart_chrome,
                 mode=args.mode,
+                auto_cleanup_minutes=0.0
+                if args.no_auto_cleanup
+                else args.auto_cleanup_minutes,
             )
         )
         return 0

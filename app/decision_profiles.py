@@ -167,6 +167,83 @@ def trend_labels(
     return sorted(set(labels))
 
 
+def evidence_check(
+    windows: dict[str, Any],
+    season: dict[str, Any],
+    side: str,
+) -> dict[str, Any]:
+    side = side if side in {"over", "under"} else "under"
+    window_checks = {
+        window: _window_evidence_state(
+            windows.get(window) or {},
+            side,
+            expected_games=int(window),
+        )
+        for window in ("5", "10", "15")
+    }
+    season_check = _season_evidence_state(season or {})
+    broader = [window_checks["10"], window_checks["15"], season_check]
+    broader_available = [
+        item for item in broader if item["state"] not in {"missing", "partial"}
+    ]
+    broader_support = [item for item in broader_available if item["state"] == "supports"]
+    broader_oppose = [item for item in broader_available if item["state"] == "opposes"]
+    last5_supports = window_checks["5"]["state"] == "supports"
+    last5_opposes = window_checks["5"]["state"] == "opposes"
+    broader_supports = bool(broader_support)
+    broader_opposes = bool(broader_oppose)
+    missing_broader = [
+        name
+        for name, item in (
+            ("last10", window_checks["10"]),
+            ("last15", window_checks["15"]),
+            ("season", season_check),
+        )
+        if item["state"] in {"missing", "partial"}
+    ]
+
+    last5_only_support = last5_supports and not broader_supports
+    overreaction_risk = last5_supports and (
+        broader_opposes or len(broader_available) < 2 or last5_only_support
+    )
+    if last5_supports and broader_supports and not broader_opposes:
+        alignment = "aligned"
+    elif last5_supports and broader_opposes:
+        alignment = "conflicting"
+    elif last5_only_support:
+        alignment = "last5_only"
+    elif last5_opposes and broader_supports:
+        alignment = "longer_sample_supports_but_recent_does_not"
+    else:
+        alignment = "neutral_or_mixed"
+
+    guidance: list[str] = []
+    if missing_broader:
+        guidance.append("Do not upgrade confidence from last 5 without missing broader evidence.")
+    if overreaction_risk:
+        guidance.append("Last 5 is not enough; disclose last-5 overreaction risk before recommending.")
+    if alignment == "aligned":
+        guidance.append("Last 5 agrees with broader evidence; still mention market and role risk.")
+    if not guidance:
+        guidance.append("Use as supporting evidence only; do not treat any single window as probability.")
+
+    return {
+        "requestedSide": side,
+        "last5": window_checks["5"],
+        "last10": window_checks["10"],
+        "last15": window_checks["15"],
+        "season": season_check,
+        "broaderSampleAvailable": len(broader_available) >= 2,
+        "missingBroaderEvidence": missing_broader,
+        "broaderEvidenceSupportsSide": broader_supports,
+        "broaderEvidenceOpposesSide": broader_opposes,
+        "last5OnlySupport": last5_only_support,
+        "last5OverreactionRisk": overreaction_risk,
+        "alignment": alignment,
+        "guidance": guidance,
+    }
+
+
 def build_decision_profile(
     selection: dict[str, Any],
     stat_context: dict[str, Any],
@@ -190,6 +267,7 @@ def build_decision_profile(
     line_value = _line_value(metrics)
     odds_value = _odds_value(selection.get("odds"))
     sample_reliability = _sample_reliability(metrics)
+    evidence_guard = metrics.get("evidenceCheck") or {}
     final_status = _final_status(
         playable=playable,
         data_quality=data_quality,
@@ -209,7 +287,9 @@ def build_decision_profile(
         "roleRisk": _role_risk(all_flags),
         "marketRisk": market.get("marketRisk"),
         "sampleReliability": sample_reliability,
-        "recencyTrap": "last5_overreaction_risk" in all_flags,
+        "recencyTrap": "last5_overreaction_risk" in all_flags
+        or bool(evidence_guard.get("last5OverreactionRisk")),
+        "evidenceCheck": evidence_guard,
         "riskFlags": all_flags,
         "contextCap": market.get("contextCap"),
     }
@@ -279,6 +359,53 @@ def _window_summary(
         "hitRates": hit_rates,
         "sideHitRate": hit_rates.get(side),
         "sideMargin": _side_margin(average, line, side),
+    }
+
+
+def _window_evidence_state(
+    window: dict[str, Any],
+    side: str,
+    expected_games: int,
+) -> dict[str, Any]:
+    games = _int_or_none(window.get("gamesUsed")) or 0
+    rate = _float_or_none((window.get("hitRates") or {}).get(side))
+    margin = _float_or_none(window.get("sideMargin"))
+    if games <= 0 or rate is None:
+        state = "missing"
+    elif games < expected_games:
+        state = "partial"
+    elif rate >= 0.6:
+        state = "supports"
+    elif rate <= 0.4:
+        state = "opposes"
+    else:
+        state = "neutral"
+    return {
+        "state": state,
+        "gamesUsed": games,
+        "expectedGames": expected_games,
+        "sideHitRate": rate,
+        "average": _float_or_none(window.get("average")),
+        "sideMargin": margin,
+    }
+
+
+def _season_evidence_state(season: dict[str, Any]) -> dict[str, Any]:
+    games = _int_or_none(season.get("gamesUsed")) or 0
+    margin = _float_or_none(season.get("sideMargin"))
+    if games <= 0 or margin is None:
+        state = "missing"
+    elif margin > 0:
+        state = "supports"
+    elif margin < 0:
+        state = "opposes"
+    else:
+        state = "neutral"
+    return {
+        "state": state,
+        "gamesUsed": games,
+        "average": _float_or_none(season.get("average")),
+        "sideMargin": margin,
     }
 
 

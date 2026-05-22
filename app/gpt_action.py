@@ -12,6 +12,7 @@ from fastapi import Header, HTTPException
 from .decision_profiles import (
     build_decision_profile,
     decision_profile_summary,
+    evidence_check,
     evidence_windows,
     market_heatmap,
     season_evidence,
@@ -1684,7 +1685,14 @@ def _selection_metrics(
     agreement = _agreement_score(recent_margin, season_margin, hit_rates, side)
     windows = evidence_windows(recent, stat_key, line, side)
     season = season_evidence(prop.get("mlbProfile"), stat_key, line, side)
+    guard = evidence_check(windows, season, side)
     labels = trend_labels(windows, season, side)
+    if guard.get("last5OverreactionRisk"):
+        labels = sorted(set(labels + ["last5_overreaction_risk"]))
+    if guard.get("last5OnlySupport"):
+        labels = sorted(set(labels + ["last5_only_support"]))
+    if guard.get("missingBroaderEvidence"):
+        labels = sorted(set(labels + ["broader_evidence_missing"]))
     return {
         "statKey": stat_key,
         "recentGamesUsed": recent.get("gamesUsed"),
@@ -1697,6 +1705,7 @@ def _selection_metrics(
         "agreementScore": agreement,
         "windows": windows,
         "season": season,
+        "evidenceCheck": guard,
         "trendLabels": labels,
     }
 

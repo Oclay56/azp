@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 from app import local_stake_helper
 
@@ -321,3 +322,60 @@ def test_process_job_does_not_crash_when_failure_reporting_fails(monkeypatch, ca
     output = capsys.readouterr().out
     assert "Failed job job-456" in output
     assert "Could not report failed job job-456" in output
+
+
+def test_debug_chrome_launch_opens_stake_in_visible_window(monkeypatch, tmp_path):
+    monkeypatch.delenv("AZP_STAKE_START_URL", raising=False)
+
+    args = local_stake_helper._debug_chrome_args(
+        Path("C:/Chrome/chrome.exe"),
+        tmp_path / "profile",
+        9222,
+    )
+
+    assert Path(args[0]) == Path("C:/Chrome/chrome.exe")
+    assert "--new-window" in args
+    assert "--start-maximized" in args
+    assert "--window-position=80,40" in args
+    assert "--window-position=-32000,-32000" not in args
+    assert "about:blank" not in args
+    assert args[-1] == "https://stake.com"
+
+
+def test_debug_chrome_launch_allows_start_url_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("AZP_STAKE_START_URL", "https://stake.com/sports")
+
+    args = local_stake_helper._debug_chrome_args(
+        Path("C:/Chrome/chrome.exe"),
+        tmp_path / "profile",
+        9222,
+    )
+
+    assert args[-1] == "https://stake.com/sports"
+
+
+def test_supabase_cache_cleanup_sync_uses_env_settings(monkeypatch):
+    seen: dict[str, object] = {}
+
+    def fake_run_cleanup(**kwargs):
+        seen.update(kwargs)
+        return {
+            "expiredJobs": 2,
+            "deletedJobs": 3,
+        }
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-key")
+    monkeypatch.setenv("AZP_LOCAL_UI_JOB_TABLE", "local_ui_jobs")
+    monkeypatch.setenv("AZP_SUPABASE_JOB_RETENTION_HOURS", "4")
+    monkeypatch.setenv("AZP_SUPABASE_STALE_JOB_MINUTES", "9")
+    monkeypatch.setattr(local_stake_helper, "run_cleanup", fake_run_cleanup)
+
+    result = local_stake_helper._run_supabase_cache_cleanup_sync()
+
+    assert result == {"expiredJobs": 2, "deletedJobs": 3}
+    assert seen["supabase_url"] == "https://example.supabase.co"
+    assert seen["service_key"] == "service-key"
+    assert seen["table_name"] == "local_ui_jobs"
+    assert seen["retention_hours"] == 4
+    assert seen["stale_running_minutes"] == 9

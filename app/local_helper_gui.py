@@ -10,6 +10,8 @@ from pathlib import Path
 from tkinter import BOTH, END, LEFT, RIGHT, Button, Canvas, Frame, Label, Tk, Text, messagebox
 from ctypes import wintypes
 
+from .local_helper_setup import check_local_helper_setup, format_setup_report
+
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 WPARAM = ctypes.c_size_t
@@ -247,16 +249,16 @@ class WindowsTrayIcon:
 class AzpHelperGui:
     def __init__(self) -> None:
         self.root = Tk()
-        self.root.title("AZP Local Helper")
-        self.root.geometry("720x440")
-        self.root.minsize(620, 360)
+        self.root.title("Stake-GPT Helper")
+        self.root.geometry("780x500")
+        self.root.minsize(700, 400)
         self.root.configure(bg=HELPER_BG)
         self.process: subprocess.Popen[str] | None = None
         self.output_queue: queue.Queue[str] = queue.Queue()
         self._closing = False
         self._hidden_to_tray = False
         self.tray_icon = WindowsTrayIcon(
-            "AZP Local Helper",
+            "Stake-GPT Helper",
             on_restore=lambda: self.root.after(0, self.restore_from_tray),
             on_exit=lambda: self.root.after(0, self.close),
         )
@@ -294,9 +296,23 @@ class AzpHelperGui:
         ).pack(side=LEFT, padx=(0, 8))
         Button(
             controls,
-            text="Stop Helper",
+            text="Setup Check",
+            command=self.run_setup_check,
+            width=15,
+            **_button_style(),
+        ).pack(side=LEFT, padx=(0, 8))
+        Button(
+            controls,
+            text="Clean Cache",
+            command=self.run_cache_cleanup,
+            width=14,
+            **_button_style(),
+        ).pack(side=LEFT)
+        Button(
+            controls,
+            text="Stop",
             command=self.stop_helper,
-            width=16,
+            width=10,
             **_button_style(),
         ).pack(side=RIGHT)
 
@@ -329,6 +345,7 @@ class AzpHelperGui:
         self.log.pack(fill=BOTH, expand=True, padx=16, pady=(8, 16))
         self._write_log("Pick a mode. Close this window when you are done.\n")
         self._write_log("Build Mode never enters a stake amount and never clicks Place Bet.\n\n")
+        self._write_log(format_setup_report(check_local_helper_setup(ROOT_DIR)) + "\n\n")
 
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         self.root.bind("<Unmap>", self.on_unmap)
@@ -339,20 +356,17 @@ class AzpHelperGui:
 
     def start_helper(self, mode: str) -> None:
         if self.process and self.process.poll() is None:
-            messagebox.showinfo("AZP Local Helper", "Helper is already running.")
+            messagebox.showinfo("Stake-GPT Helper", "Helper is already running.")
             return
 
         python_exe = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
-        if not python_exe.exists():
+        setup_report = check_local_helper_setup(ROOT_DIR)
+        if not setup_report["ok"]:
+            report_text = format_setup_report(setup_report)
+            self._write_log(report_text + "\n\n")
             messagebox.showerror(
-                "AZP Local Helper",
-                f"Could not find {python_exe}. Run the project setup first.",
-            )
-            return
-        if not (ROOT_DIR / ".env").exists():
-            messagebox.showerror(
-                "AZP Local Helper",
-                f"Could not find {ROOT_DIR / '.env'}. The helper needs Supabase settings.",
+                "Stake-GPT Helper",
+                report_text,
             )
             return
 
@@ -370,6 +384,48 @@ class AzpHelperGui:
             creationflags=creationflags,
         )
         threading.Thread(target=self.capture_output, daemon=True).start()
+
+    def run_setup_check(self) -> None:
+        report_text = format_setup_report(check_local_helper_setup(ROOT_DIR))
+        self._write_log(report_text + "\n\n")
+        self.status_label.configure(
+            text="Status: setup ready"
+            if "Ready." in report_text
+            else "Status: setup needs attention"
+        )
+
+    def run_cache_cleanup(self) -> None:
+        python_exe = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
+        if not python_exe.exists():
+            messagebox.showerror(
+                "Stake-GPT Helper",
+                f"Could not find {python_exe}. Run the project setup first.",
+            )
+            return
+        if not (ROOT_DIR / ".env").exists():
+            messagebox.showerror(
+                "Stake-GPT Helper",
+                f"Could not find {ROOT_DIR / '.env'}. The cleanup needs Supabase settings.",
+            )
+            return
+
+        self.status_label.configure(text="Status: cleaning Supabase cache...")
+        self._write_log("Running Supabase cache cleanup...\n")
+        threading.Thread(target=self._run_cache_cleanup_thread, daemon=True).start()
+
+    def _run_cache_cleanup_thread(self) -> None:
+        python_exe = ROOT_DIR / ".venv" / "Scripts" / "python.exe"
+        completed = subprocess.run(
+            [str(python_exe), "-m", "app.supabase_cache"],
+            cwd=ROOT_DIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        output = completed.stdout or ""
+        if output:
+            self.output_queue.put(output)
+        self.output_queue.put(f"Supabase cache cleanup exited with code {completed.returncode}.\n")
 
     def stop_helper(self) -> None:
         if not self.process or self.process.poll() is not None:
@@ -444,6 +500,10 @@ class AzpHelperGui:
                 self.status_label.configure(text="Status: waiting for GPT jobs")
             elif "completed job" in lower:
                 self.status_label.configure(text="Status: completed job; waiting for next job")
+            elif "supabase cleanup" in lower and "exited with code 0" in lower:
+                self.status_label.configure(text="Status: cache cleaned")
+            elif "supabase cleanup" in lower:
+                self.status_label.configure(text="Status: cache cleanup updated")
             elif "helper poll error" in lower:
                 self.status_label.configure(text="Status: connection issue; retrying")
             elif "failed job" in lower:

@@ -6,6 +6,7 @@ from datetime import date
 import pytest
 from fastapi.testclient import TestClient
 
+from app.decision_profiles import evidence_check
 from app.gpt_action import (
     build_board_summary,
     build_comparison_board,
@@ -377,6 +378,11 @@ def test_comparison_board_adds_compact_mlb_metrics_without_final_picks():
     assert springer["metrics"]["seasonAverage"] == 0.75
     assert springer["metrics"]["recentHitRateUnder"] == 1.0
     assert springer["metrics"]["windows"]["5"]["average"] == 0.4
+    assert springer["metrics"]["evidenceCheck"]["last5"]["state"] == "supports"
+    assert springer["metrics"]["evidenceCheck"]["last10"]["state"] == "partial"
+    assert springer["metrics"]["evidenceCheck"]["last5OverreactionRisk"] is True
+    assert "last10" in springer["metrics"]["evidenceCheck"]["missingBroaderEvidence"]
+    assert springer["decisionProfile"]["recencyTrap"] is True
     assert springer["decisionProfile"]["finalStatus"] in {
         "playable",
         "playable_but_volatile",
@@ -507,6 +513,41 @@ def test_prop_context_uses_requested_side_when_prop_id_is_ambiguous():
     assert result["side"] == "under"
     assert result["odds"] == springer_under["odds"]
     assert result["requestedSide"] == "under"
+
+
+def test_evidence_check_flags_last5_spike_against_longer_windows():
+    guard = evidence_check(
+        windows={
+            "5": {
+                "gamesUsed": 5,
+                "average": 0.2,
+                "hitRates": {"under": 0.8, "over": 0.2},
+                "sideMargin": 0.3,
+            },
+            "10": {
+                "gamesUsed": 10,
+                "average": 0.8,
+                "hitRates": {"under": 0.4, "over": 0.6},
+                "sideMargin": -0.3,
+            },
+            "15": {
+                "gamesUsed": 15,
+                "average": 0.9,
+                "hitRates": {"under": 0.3333, "over": 0.6667},
+                "sideMargin": -0.4,
+            },
+        },
+        season={"gamesUsed": 40, "average": 0.75, "sideMargin": -0.25},
+        side="under",
+    )
+
+    assert guard["last5"]["state"] == "supports"
+    assert guard["last10"]["state"] == "opposes"
+    assert guard["last15"]["state"] == "opposes"
+    assert guard["season"]["state"] == "opposes"
+    assert guard["broaderEvidenceOpposesSide"] is True
+    assert guard["last5OverreactionRisk"] is True
+    assert guard["alignment"] == "conflicting"
 
 
 def test_validate_gpt_selections_checks_current_stake_line_side_and_odds():

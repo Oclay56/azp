@@ -2,7 +2,7 @@
 setlocal
 
 cd /d "%~dp0"
-title AZP Stake UI Helper
+title Stake-GPT Helper
 
 if not exist ".venv\Scripts\python.exe" (
   echo ERROR: Could not find .venv\Scripts\python.exe
@@ -14,7 +14,7 @@ if not exist ".venv\Scripts\python.exe" (
 
 if not exist ".env" (
   echo ERROR: Could not find .env
-  echo The helper needs local Supabase settings in C:\Users\farne\Desktop\AZP\.env
+  echo Stake-GPT needs local Supabase settings in C:\Users\farne\Desktop\AZP\.env
   echo.
   pause
   exit /b 1
